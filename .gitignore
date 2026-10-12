@@ -6,3 +6,9 @@ __pycache__/
 .beads/interactions.jsonl
 .beads/events.jsonl
 data/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/

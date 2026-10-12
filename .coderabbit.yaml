@@ -1,0 +1,26 @@
+language: "en-US"
+tone_instructions: "Be direct and concise. No fluff."
+
+reviews:
+  profile: "chill"
+  high_level_summary: true
+  collapse_walkthrough: true
+  poem: false
+  sequence_diagrams: false
+  suggested_reviewers: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!uv.lock"
+    - "!docs/images/**"
+    - "!.beads/**"
+    - "!**/__pycache__/**"
+  path_instructions:
+    - path: "**/*.py"
+      instructions: |
+        This app handles menstrual health data. Flag anything that logs personal data or message
+        contents, any record written outside the private data repo, and any new hard-coded
+        user-facing string (every string must be translatable).
+    - path: "tests/**"
+      instructions: Tests use synthetic people and dates only. Flag real names or real cycle data.
