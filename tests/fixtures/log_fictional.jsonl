@@ -1,0 +1,53 @@
+{"date": "2024-10-07", "flow": "medium", "cycle_start": true, "source": "apple-health-export-2025-06-30"}
+{"date": "2024-10-08", "flow": "heavy", "symptoms": ["abdominal_cramps", "fatigue"], "source": "apple-health-export-2025-06-30"}
+{"date": "2024-10-09", "flow": "medium", "source": "apple-health-export-2025-06-30"}
+{"date": "2024-10-10", "flow": "light", "source": "apple-health-export-2025-06-30"}
+{"date": "2024-11-03", "flow": "heavy", "cycle_start": true, "source": "apple-health-export-2025-06-30"}
+{"date": "2024-11-04", "flow": "heavy", "source": "apple-health-export-2025-06-30"}
+{"date": "2024-11-05", "flow": "medium", "source": "apple-health-export-2025-06-30"}
+{"date": "2024-11-06", "flow": "light", "source": "apple-health-export-2025-06-30"}
+{"date": "2024-11-07", "flow": "light", "source": "apple-health-export-2025-06-30"}
+{"date": "2024-12-06", "flow": "unspecified", "cycle_start": true, "source": "apple-health-export-2025-06-30"}
+{"date": "2024-12-07", "flow": "unspecified", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-01-04", "flow": "medium", "cycle_start": true, "source": "apple-health-export-2025-06-30"}
+{"date": "2025-01-05", "flow": "medium", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-01-06", "flow": "light", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-01-07", "flow": "light", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-02-03", "flow": "light", "cycle_start": true, "source": "apple-health-export-2025-06-30"}
+{"date": "2025-02-04", "flow": "medium", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-02-05", "flow": "medium", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-02-06", "flow": "light", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-02-21", "symptoms": ["spotting"], "source": "apple-health-export-2025-06-30"}
+{"date": "2025-02-28", "flow": "heavy", "cycle_start": true, "source": "apple-health-export-2025-06-30"}
+{"date": "2025-03-01", "flow": "medium", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-03-02", "flow": "light", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-03-30", "symptoms": ["headache"], "source": "apple-health-export-2025-06-30"}
+{"date": "2025-04-01", "flow": "medium", "cycle_start": true, "source": "apple-health-export-2025-06-30"}
+{"date": "2025-04-02", "flow": "heavy", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-04-03", "flow": "medium", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-04-04", "flow": "light", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-04-05", "flow": "none", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-04-29", "flow": "medium", "cycle_start": true, "source": "apple-health-export-2025-06-30"}
+{"date": "2025-04-30", "flow": "medium", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-05-01", "flow": "light", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-05-02", "flow": "light", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-06-02", "flow": "heavy", "cycle_start": true, "source": "apple-health-export-2025-06-30"}
+{"date": "2025-06-03", "flow": "heavy", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-06-04", "flow": "medium", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-06-05", "flow": "light", "source": "apple-health-export-2025-06-30"}
+{"date": "2025-07-01", "flow": "unspecified", "cycle_start": true, "pain": 5, "source": "telegram"}
+{"date": "2025-07-02", "flow": "medium", "pain": 3, "source": "telegram"}
+{"date": "2025-07-03", "flow": "light", "pain": 2, "source": "telegram"}
+{"date": "2025-07-04", "flow": "light", "pain": 1, "source": "telegram"}
+{"date": "2025-07-05", "flow": "light", "pain": 0, "source": "telegram"}
+{"date": "2025-07-15", "flow": "light", "pain": 1, "source": "telegram"}
+{"date": "2025-07-28", "flow": "medium", "cycle_start": true, "pain": 5, "source": "telegram"}
+{"date": "2025-07-29", "flow": "medium", "pain": 3, "source": "admin"}
+{"date": "2025-07-30", "flow": "light", "pain": 2, "source": "telegram"}
+{"date": "2025-07-31", "flow": "none", "source": "telegram"}
+{"date": "2025-08-28", "flow": "medium", "cycle_start": true, "pain": 6, "symptoms": ["abdominal_cramps", "lower_back_pain"], "note": "me ha pillado en clase de yoga", "source": "telegram"}
+{"date": "2025-08-29", "flow": "heavy", "pain": 3, "source": "telegram"}
+{"date": "2025-08-30", "flow": "medium", "pain": 2, "source": "telegram"}
+{"date": "2025-08-31", "flow": "light", "pain": 1, "source": "telegram"}
+{"date": "2025-09-01", "flow": "light", "pain": 0, "source": "telegram"}
+{"date": "2025-09-02", "flow": "none", "source": "telegram"}
