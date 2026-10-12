@@ -195,6 +195,11 @@ def test_a_good_block():
     assert e.delete == {d("2027-03-01")}
 
 
+def test_note_length_is_counted_after_trimming():
+    e = validate_block(_day(note="  " + "x" * 500 + "  "), TODAY)
+    assert e.days[d("2027-03-09")]["note"] == "x" * 500
+
+
 def test_ninety_days_back_is_accepted():
     oldest = (TODAY - timedelta(days=90)).isoformat()
     assert validate_block({"days": [{"date": oldest, "flow": "light"}]}, TODAY).days

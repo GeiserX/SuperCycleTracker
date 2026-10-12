@@ -139,6 +139,11 @@ def save(path: str | Path, log: Mapping[date, Day]) -> None:
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+    dir_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)  # make the rename itself survive a power cut
+    finally:
+        os.close(dir_fd)
 
 
 # --- cycle starts --------------------------------------------------------------------------
@@ -260,9 +265,10 @@ def _check_fields(fields: dict[str, object]) -> dict[str, object]:
         note = fields["note"]
         if not isinstance(note, str):
             raise BlockError("bad_note")
+        note = note.strip()
         if len(note) > MAX_NOTE:
             raise BlockError("note_too_long")
-        out["note"] = note.strip()
+        out["note"] = note
     return out
 
 
