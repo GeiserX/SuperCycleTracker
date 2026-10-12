@@ -1,0 +1,7 @@
+.venv
+.git
+tests
+tests/fixtures/*.jsonl
+data/
+.beads/
+**/__pycache__
