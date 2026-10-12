@@ -51,19 +51,23 @@ def test_bot_day_ends_at_five():
 def test_bot_day_on_the_spring_forward_day():
     # 2026-03-29: 02:00 CET becomes 03:00 CEST (UTC+2)
     utc = UTC
-    assert bot_day(datetime(2026, 3, 29, 2, 59, tzinfo=utc), MADRID) == d("2026-03-28")  # 04:59
-    assert bot_day(datetime(2026, 3, 29, 3, 1, tzinfo=utc), MADRID) == d("2026-03-29")  # 05:01
-    assert bot_day(datetime(2026, 3, 29, 19, 0, tzinfo=utc), MADRID) == d("2026-03-29")  # 21:00
+    spring = d("2026-03-29")
+    before = spring - timedelta(days=1)
+    assert bot_day(datetime(2026, 3, 29, 2, 59, tzinfo=utc), MADRID) == before  # 04:59
+    assert bot_day(datetime(2026, 3, 29, 3, 1, tzinfo=utc), MADRID) == spring  # 05:01
+    assert bot_day(datetime(2026, 3, 29, 19, 0, tzinfo=utc), MADRID) == spring  # 21:00
 
 
 def test_bot_day_on_the_fall_back_day():
     # 2026-10-25: 03:00 CEST becomes 02:00 CET (UTC+1)
     utc = UTC
-    assert bot_day(datetime(2026, 10, 25, 0, 30, tzinfo=utc), MADRID) == d("2026-10-24")  # 02:30
-    assert bot_day(datetime(2026, 10, 25, 1, 30, tzinfo=utc), MADRID) == d("2026-10-24")  # 02:30
-    assert bot_day(datetime(2026, 10, 25, 3, 59, tzinfo=utc), MADRID) == d("2026-10-24")  # 04:59
-    assert bot_day(datetime(2026, 10, 25, 4, 1, tzinfo=utc), MADRID) == d("2026-10-25")  # 05:01
-    assert bot_day(datetime(2026, 10, 25, 20, 0, tzinfo=utc), MADRID) == d("2026-10-25")  # 21:00
+    fall_back = d("2026-10-25")
+    before = fall_back - timedelta(days=1)
+    assert bot_day(datetime(2026, 10, 25, 0, 30, tzinfo=utc), MADRID) == before  # 02:30
+    assert bot_day(datetime(2026, 10, 25, 1, 30, tzinfo=utc), MADRID) == before  # 02:30
+    assert bot_day(datetime(2026, 10, 25, 3, 59, tzinfo=utc), MADRID) == before  # 04:59
+    assert bot_day(datetime(2026, 10, 25, 4, 1, tzinfo=utc), MADRID) == fall_back  # 05:01
+    assert bot_day(datetime(2026, 10, 25, 20, 0, tzinfo=utc), MADRID) == fall_back  # 21:00
 
 
 # --- prediction ----------------------------------------------------------------------------
@@ -101,7 +105,7 @@ def test_window_is_widened_to_two_days_each_side():
 
 def test_even_count_median_rounds_half_up():
     p = predict(history("2027-01-01", [29, 30, 25, 34]), d("2027-12-31"))
-    assert p.median == 30  # median 29.5
+    assert p.median == 30  # the middle two lengths are 29 and 30: half rounds up
     assert p.window_start == p.last_start + timedelta(days=25)
     assert p.window_end == p.last_start + timedelta(days=34)
 
