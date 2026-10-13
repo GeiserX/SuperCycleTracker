@@ -54,7 +54,7 @@ def make_bot(data_repo):
     with three bleed days and no closing day), at 21:00 on `today`."""
     bots = []
 
-    def make(today=date(2027, 3, 4), profile=PROFILE, log=None, read_all=False):
+    def make(today=date(2027, 3, 4), profile=PROFILE, log=None, read_all=False, member=None):
         (data_repo.data / "cycle" / "profile.yaml").write_text(profile, encoding="utf-8")
         (data_repo.data / "plugins").mkdir(exist_ok=True)
         shutil.copy(FIXTURES / "fake_plugin.py", data_repo.data / "plugins" / "fake.py")
@@ -62,6 +62,8 @@ def make_bot(data_repo):
             records.save(data_repo.log, records.derive_starts(log))
         tg = FakeTelegram()
         tg.me["can_read_all_group_messages"] = read_all
+        if member is not None:
+            tg.member = member
         bot = Bot(data_repo.data, tg, now=Clock(at(today)))
         bot.start()
         bots.append(bot)
@@ -825,6 +827,34 @@ def test_with_privacy_off_an_admins_reply_to_her_is_not_for_the_bot(make_bot):
     assert len(plugin(bot).CALLS) == 1
 
 
+@pytest.mark.parametrize("status", ["administrator", "creator"])
+def test_a_bot_that_is_a_group_admin_reads_her_plain_text(make_bot, caplog, status):
+    with caplog.at_level(logging.INFO):
+        bot = make_bot(member={"status": status})
+    assert bot.tg.of("getChatMember") == [{"chat_id": GROUP, "user_id": BOT_ID}]
+    assert bot.read_all is True
+    assert "group privacy off: every group message arrives (group admin)" in caplog.text
+    say(bot, "¿cenamos fuera?", user=ADMIN)
+    assert plugin(bot).CALLS == []
+    say(bot, "me ha bajado hoy")
+    assert plugin(bot).CALLS[0]["turn"]["new"][0]["content"] == "Lucía: me ha bajado hoy"
+
+
+def test_a_plain_member_bot_keeps_privacy_on_and_a_failed_check_still_starts(make_bot, caplog):
+    caplog.set_level(logging.INFO)
+    bot = make_bot()
+    assert bot.read_all is False
+    assert "group privacy on" in caplog.text
+    bot.tg.fail_next("getChatMember", 400, "Bad Request: chat not found")
+    bot.start()
+    assert bot.read_all is False
+    assert "getChatMember failed" in caplog.text
+    bot.tg.me["can_read_all_group_messages"] = True  # the other way in, named in the log
+    bot.start()
+    assert bot.read_all is True
+    assert "(privacy mode off)" in caplog.text
+
+
 def test_strangers_and_other_chats_get_no_answer(make_bot):
     bot = make_bot(read_all=True)
     say(bot, "hola", user=STRANGER, reply_to=QUESTION)
@@ -1250,3 +1280,253 @@ def test_run_stops_on_a_bad_token(make_bot):
     bot.tg.fail_next("getMe", 401, "Unauthorized")
     with pytest.raises(TelegramError):
         bot.run(threading.Event())
+
+
+# --- voice notes ---------------------------------------------------------------------------
+
+
+def voice(bot, user=HER, chat=GROUP, file_id="v1", private=False, kind="voice", **media):
+    """A voice note (or an audio file) as Telegram delivers it, with no text and no mention."""
+    message = {
+        "message_id": next(_ids),
+        "from": {"id": user},
+        "chat": {"id": chat, "type": "private" if private else "supergroup"},
+        kind: {"file_id": file_id, "duration": 4, **media},
+    }
+    bot.handle({"update_id": 3, "message": message})
+    bot.worker.join_idle()
+    return message
+
+
+def under(sent, message):
+    return sent.get("reply_parameters", {}).get("message_id") == message["message_id"]
+
+
+def test_a_voice_note_is_heard_echoed_and_answered_without_a_mention(make_bot):
+    bot = make_bot()  # privacy on: her plain text in the group would not be for the bot
+    mod = plugin(bot)
+    bot.tg.files["v1"] = b"OggS fictional"
+    mod.VOICES[:] = ["  me ha bajado hoy, poco  "]
+    msg = voice(bot, mime_type="audio/ogg")
+    assert mod.HEARD == [(b"OggS fictional", "audio/ogg", "es")]
+    assert bot.tg.of("download") == [{"file_path": "voice/v1.oga", "limit": 20 * 1024 * 1024}]
+    echo, answer = bot.tg.of("sendMessage")
+    assert echo["text"] == "🎤 me ha bajado hoy, poco"
+    assert under(echo, msg)
+    assert mod.CALLS[0]["turn"]["new"] == [
+        {"role": "user", "content": "Lucía: [voice note] me ha bajado hoy, poco"}
+    ]
+    assert answer["text"] == "Vale." and under(answer, msg)
+    assert bot.kv.get_json(f"pending:{GROUP}") is None
+
+
+def test_an_audio_file_and_an_admins_note_in_private_are_heard(make_bot):
+    bot = make_bot()
+    mod = plugin(bot)
+    bot.tg.files["a1"] = b"ID3 fictional"
+    mod.VOICES[:] = ["ayer tuvo mucho"]
+    mod.REPLIES[:] = [record("Apuntado.", {"date": "2027-03-03", "flow": "heavy"})]
+    voice(
+        bot,
+        user=ADMIN,
+        chat=ADMIN,
+        private=True,
+        kind="audio",
+        file_id="a1",
+        mime_type="audio/mpeg",
+    )
+    assert mod.HEARD[0][1] == "audio/mpeg"
+    assert mod.CALLS[0]["turn"]["new"][0]["content"] == "Marta: [voice note] ayer tuvo mucho"
+    assert day(bot, date(2027, 3, 3)).source == "admin"
+
+
+def test_a_voice_note_from_a_stranger_or_another_chat_is_ignored(make_bot):
+    bot = make_bot(read_all=True)
+    bot.tg.files["v1"] = b"x"
+    plugin(bot).VOICES[:] = ["hola", "hola"]
+    voice(bot, user=STRANGER)
+    voice(bot, chat=-100999)
+    voice(bot, user=STRANGER, chat=STRANGER, private=True)
+    assert plugin(bot).HEARD == []
+    assert bot.tg.of("getFile") == [] and bot.tg.texts() == []
+
+
+def test_a_voice_note_the_plugin_cannot_hear_says_voice_off(make_bot, monkeypatch):
+    bot = make_bot()
+    mod = plugin(bot)
+    bot.tg.files["v1"] = b"x"
+    msg = voice(bot)  # nothing scripted: the fake raises NotImplementedError
+    (sent,) = bot.tg.of("sendMessage")
+    assert sent["text"] == "Ahora mismo no puedo escuchar notas de voz. ¿Me lo escribes?"
+    assert under(sent, msg)
+    assert mod.CALLS == [] and bot.kv.get_json(f"pending:{GROUP}") is None
+    monkeypatch.delattr(mod, "transcribe")  # a plugin with no transcribe at all
+    voice(bot)
+    assert bot.tg.texts()[-1].startswith("Ahora mismo no puedo escuchar")
+    assert mod.CALLS == []
+
+
+def test_without_an_assistant_a_voice_note_says_voice_off_at_once(make_bot):
+    bot = make_bot(profile=PROFILE.split("assistant:")[0])
+    voice(bot)
+    assert bot.tg.texts() == ["Ahora mismo no puedo escuchar notas de voz. ¿Me lo escribes?"]
+    assert bot.tg.of("getFile") == []
+
+
+@pytest.mark.parametrize("failure", ["plugin", "empty", "download", "getFile"])
+def test_a_voice_note_that_fails_says_voice_failed_and_logs_no_words(make_bot, caplog, failure):
+    bot = make_bot()
+    mod = plugin(bot)
+    bot.tg.files["v1"] = b"x"
+    mod.VOICES[:] = [RuntimeError("me duele la tripa") if failure == "plugin" else "   "]
+    if failure == "download":
+        mod.VOICES[:] = ["me duele la tripa"]
+        bot.tg.fail_next("download", 0, "TimeoutError")
+    if failure == "getFile":
+        bot.tg.fail_next("getFile", 400, "Bad Request: wrong file_id")
+    with caplog.at_level(logging.INFO):
+        msg = voice(bot)
+    (sent,) = bot.tg.of("sendMessage")
+    assert sent["text"] == "No he entendido la nota de voz. ¿Me lo escribes?"
+    assert under(sent, msg)
+    assert mod.CALLS == [] and bot.kv.get_json(f"pending:{GROUP}") is None
+    assert "voice not heard: voice_failed" in caplog.text
+    assert "tripa" not in caplog.text
+
+
+def test_a_voice_note_over_20_mib_is_refused(make_bot, monkeypatch):
+    bot = make_bot()
+    mod = plugin(bot)
+    msg = voice(bot, file_size=20 * 1024 * 1024 + 1)  # refused on arrival, from its size
+    assert bot.tg.texts() == ["Esa nota de voz es muy larga para mí. ¿Me lo resumes por escrito?"]
+    assert under(bot.tg.of("sendMessage")[0], msg)
+    assert bot.tg.of("getFile") == []
+    monkeypatch.setattr("supercycletracker.bot.VOICE_MAX", 4)  # a note with no size on it
+    bot.tg.files["v1"] = b"too long"
+    mod.VOICES[:] = ["no debería oírse"]
+    voice(bot)
+    assert bot.tg.texts()[-1].startswith("Esa nota de voz es muy larga")
+    assert mod.HEARD == [] and mod.CALLS == []
+
+
+def test_a_heard_note_stays_as_text_when_the_turn_fails(make_bot):
+    bot = make_bot()
+    mod = plugin(bot)
+    bot.tg.files["v1"] = b"x"
+    mod.VOICES[:] = ["me duele"]
+    mod.REPLIES[:] = [RuntimeError("down")]
+    voice(bot)
+    assert bot.tg.texts()[-1].startswith("Ahora mismo no puedo leer")
+    (line,) = bot.kv.get_json(f"pending:{GROUP}")
+    assert line["content"] == "Lucía: [voice note] me duele" and "voice" not in line
+    say(bot, "¿me oyes?", reply_to=QUESTION)
+    assert len(mod.HEARD) == 1  # heard once, never twice
+    new = [x["content"] for x in mod.CALLS[1]["turn"]["new"]]
+    assert new == [
+        "Lucía: [voice note] me duele",
+        f"Lucía: [replying to the bot: {QUESTION}] ¿me oyes?",
+    ]
+
+
+def test_the_echo_is_escaped_and_cut(make_bot):
+    bot = make_bot()
+    mod = plugin(bot)
+    bot.tg.files["v1"] = b"x"
+    mod.VOICES[:] = ["dolor <3 & poco", "palabra " * 1000]
+    voice(bot)
+    assert bot.tg.of("sendMessage")[0]["text"] == "🎤 dolor &lt;3 &amp; poco"
+    voice(bot)
+    echo = bot.tg.of("sendMessage")[2]["text"]
+    assert echo.endswith("…") and len(echo) < TEXT_MAX
+    assert mod.CALLS[1]["turn"]["new"][-1]["content"].endswith("palabra")  # the whole text goes
+
+
+# --- later ---------------------------------------------------------------------------------
+
+
+def drain(bot):
+    bot.worker.join_idle()
+    bot.later.join_idle()
+
+
+def test_later_runs_after_the_answer_and_posts_its_text(make_bot):
+    bot = make_bot()
+    plugin(bot).REPLIES[:] = [
+        {"text": "Me pongo con ello.", "conversation": "c", "kept": True, "later": lambda: "Hecho."}
+    ]
+    say(bot, "cambia la hora", reply_to=QUESTION)
+    drain(bot)
+    first, second = bot.tg.of("sendMessage")
+    assert first["text"] == "Me pongo con ello."
+    assert second["text"] == "Hecho." and second["chat_id"] == GROUP
+    assert "parse_mode" not in second  # plain text, like an answer
+
+
+@pytest.mark.parametrize("out", [RuntimeError("su nombre y sus palabras"), 42, ""])
+def test_a_later_that_fails_says_so_and_an_empty_one_says_nothing(make_bot, caplog, out):
+    bot = make_bot()
+
+    def job():
+        if isinstance(out, BaseException):
+            raise out
+        return out
+
+    plugin(bot).REPLIES[:] = [{"text": "Voy.", "later": job}]
+    with caplog.at_level(logging.INFO):
+        say(bot, "hazlo", reply_to=QUESTION)
+        drain(bot)
+    texts = bot.tg.texts()
+    if out == "":
+        assert texts == ["Voy."]
+        assert "later done" in caplog.text
+    else:
+        assert texts == [
+            "Voy.",
+            "No he podido terminar lo que estaba haciendo. Pídemelo otra vez más tarde.",
+        ]
+        assert "later failed" in caplog.text
+    assert "palabras" not in caplog.text
+
+
+def test_later_jobs_run_one_at_a_time_in_order_and_never_hold_the_turns(make_bot):
+    bot = make_bot()
+    release = threading.Event()
+    order = []
+
+    def slow():
+        order.append("slow start")
+        release.wait(5)
+        order.append("slow end")
+        return "Primero."
+
+    def quick():
+        order.append("quick")
+        return "Segundo."
+
+    plugin(bot).REPLIES[:] = [
+        {"text": "Uno.", "later": slow},
+        {"text": "Dos.", "later": quick},
+        "Tres.",
+    ]
+    try:
+        say(bot, "uno", reply_to=QUESTION)
+        say(bot, "dos", chat=HER, private=True)
+        say(bot, "tres", reply_to=QUESTION)  # answered while the slow job still runs
+        assert bot.tg.texts() == ["Uno.", "Dos.", "Tres."]
+        assert order == ["slow start"]
+    finally:
+        release.set()
+    drain(bot)
+    assert order == ["slow start", "slow end", "quick"]
+    tail = [(p["chat_id"], p["text"]) for p in bot.tg.of("sendMessage")[3:]]
+    assert tail == [(GROUP, "Primero."), (HER, "Segundo.")]
+
+
+def test_a_turn_that_is_not_kept_never_runs_its_later(make_bot):
+    bot = make_bot()
+    ran = []
+    plugin(bot).REPLIES[:] = [{"text": "x", "kept": False, "later": lambda: ran.append(1) or "y"}]
+    say(bot, "hola", reply_to=QUESTION)
+    drain(bot)
+    assert ran == []
+    assert bot.tg.texts()[-1].startswith("Ahora mismo no puedo leer")

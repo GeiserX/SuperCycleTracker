@@ -33,8 +33,9 @@ Two ways in, one truth:
   that did not happen.
 
 The bot runs as one process: a `getUpdates` long poll with a `tick()` between polls, plus one worker
-thread for assistant turns so a tap is answered while the assistant thinks. Standard library only, with
-PyYAML for the profile and the locale files.
+thread for assistant turns (and voice notes) so a tap is answered while the assistant thinks, and one
+more thread for the slow work a plugin hands back after its answer (`later`, section 6). Standard
+library only, with PyYAML for the profile and the locale files.
 
 ## 2. Records
 
@@ -296,11 +297,34 @@ mention. The rules, in both privacy settings:
 - **An assistant answer that ends with "?"** goes out with `reply_parameters` to her message plus
   selective `force_reply`, so her follow-up reaches the bot too.
 - **`/hoy <texto>`** sends text to the bot through a command.
-- **Privacy off** (`getMe.can_read_all_group_messages` true, read at start) adds one rule: every text
-  from her (`telegram.user_id`) in the configured group is a message to the bot. The group exists for
-  this, so «me ha bajado hoy» typed at 10:00 with no card open is answered and logged. Admins' plain
-  text still needs a reply, a mention or a command, so the two of them can talk in the group without
-  the bot answering him.
+- **A voice note** (a message with `voice` or `audio`) from her or an admin, in the configured group
+  or a private chat, is always a message to the bot, whatever it replies to and whether or not privacy
+  is on: a voice note cannot carry a mention, so the addressing rules above never apply to audio.
+- **Privacy off** adds one rule: every text from her (`telegram.user_id`) in the configured group is a
+  message to the bot. The group exists for this, so «me ha bajado hoy» typed at 10:00 with no card open
+  is answered and logged. Admins' plain text still needs a reply, a mention or a command, so the two of
+  them can talk in the group without the bot answering him. Telegram delivers every group message to a
+  bot that has privacy mode off **or** is an administrator of the group, but `getMe` reports only the
+  first (`can_read_all_group_messages`). So at start, after `getMe`, the bot asks `getChatMember` for
+  itself in the group: status `administrator` or `creator` turns the rule on too, and the start log
+  line says which of the two it came from. A failed check counts as no and the bot starts anyway.
+
+**Voice notes, step by step.** The note is queued like a text line, as `{"id", "ts", "voice":
+{"file_id", "mime"}, "who", "admin"}` in `pending:<chat>`, and the worker hears it before the turn,
+off the poll loop: `getFile`, the download from Telegram's file URL, the plugin's `transcribe`
+(section 6), then the echo «🎤 {text}» as a reply to the note, so she sees what the bot understood.
+The line becomes text, `Lucía: [voice note] {text}`, and goes to the assistant like a reply to the bot
+would. Once heard, the line is stored as text, so a turn that fails afterwards never transcribes the
+same note twice. A note that cannot be heard leaves the list with one line under it:
+
+| case | answer |
+|---|---|
+| no assistant, no `transcribe` in the plugin, or `NotImplementedError` | `voice_off` |
+| over 20 MiB (the message's `file_size`, `getFile`'s, or the download itself) | `voice_too_long` |
+| anything else: Telegram, the download, the plugin, an empty transcript | `voice_failed` |
+
+20 MiB is the largest file the Bot API lets a bot download. The echo is cut at 4,000 characters with
+«…»; the assistant gets the whole text. A caption on an audio file is not read.
 
 Cards cannot carry `force_reply`: Telegram allows one `reply_markup` per message, and buttons win there
 because they work with the assistant down.
@@ -391,7 +415,9 @@ You are the cycle companion of {name} in a Telegram chat. The cycle is hers; {ot
 write (they are family and can report for her). Answer in {language_name}: warm, brief (two to five
 short sentences unless she asks for more), plain text with no Markdown, links as bare URLs.
 
-Messages arrive as "Name: text". A reply carries "[replying to the bot: ...]" in front.
+Messages arrive as "Name: text". A reply carries "[replying to the bot: ...]" in front. A voice
+note carries "[voice note]" in front: her words through speech recognition, which can mishear
+a word, so when a fact you would record looks odd, ask her instead of guessing.
 
 What you do
 - Help her log her period: bleeding (none, light, medium, heavy), pain 0-10, symptoms, a short note.
@@ -491,7 +517,15 @@ data-repository pull reloads an edited plugin. A blocking plugin runs in the wor
 def converse(turn: dict, settings: dict) -> dict | str: ...
 # optional: drop a conversation (called by /nuevo)
 def forget(conversation: str, settings: dict) -> None: ...
+# optional: a voice note's text. Raises NotImplementedError when this provider cannot
+# transcribe at all (the app answers «voice_off»); any other exception is «voice_failed».
+def transcribe(audio: bytes, mime: str, language: str, settings: dict) -> str: ...
 ```
+
+`transcribe` gets the file's bytes as Telegram stored them (a voice note is `audio/ogg` Opus), the
+MIME type the message gave, and `profile.language`. It runs on the worker thread under the same wait
+and the same one-call-at-a-time rule as `converse`; text that is not a string is refused
+(`bad_transcript`, which is «voice_failed»).
 
 `turn`:
 
@@ -530,6 +564,15 @@ Return value, either a bare string (no conversation kept) or:
   outlives the wait would store a turn the app never saw.
 - The record block comes back inside `text`; the app extracts it. A provider that strips fenced blocks
   must leave `record` alone.
+- **`later`** (optional): a callable with no arguments that returns a string. It is how a plugin
+  reports something slow, such as a change it is making that takes minutes, without holding the turn.
+  The app runs it after it has posted `text` (and applied the block), on one background thread: one
+  job at a time across every chat, first in, first out, so a turn is never kept waiting by it. The
+  string it returns goes to the same chat as plain text, like an answer; an empty one posts nothing.
+  If it raises, or returns something that is not a string, the app posts `later_failed` and logs the
+  exception class only. The app sets no time limit: the plugin bounds its own work. A turn that fails
+  (`kept: false`, an exception, an answer Telegram refused) never runs its `later`. A restart loses a
+  job that is queued or running; nothing about it is stored.
 
 The public repo ships `tests/fixtures/fake_plugin.py` (a scripted `converse`) as the only example.
 
@@ -569,6 +612,11 @@ locale. English source strings and their Spanish translations:
 | `invalid_block` | I could not note that properly, so I saved nothing. Can you tell me with the buttons? | No he sabido anotarlo bien, así que no he guardado nada. ¿Me lo dices con los botones? |
 | `ai_down` | Right now I cannot read written messages. You can note it with the buttons, and if you write it again later I will read it. | Ahora mismo no puedo leer mensajes escritos. Puedes anotarlo con los botones y, si me lo vuelves a escribir más tarde, lo leo. |
 | `no_ai` | Without the assistant I cannot read written messages. You can note it with the buttons: | Sin el asistente no entiendo mensajes escritos. Puedes anotarlo con los botones: |
+| `voice_echo` | 🎤 {text} | 🎤 {text} |
+| `voice_off` | Right now I cannot listen to voice notes. Can you write it to me? | Ahora mismo no puedo escuchar notas de voz. ¿Me lo escribes? |
+| `voice_failed` | I could not make out the voice note. Can you write it to me? | No he entendido la nota de voz. ¿Me lo escribes? |
+| `voice_too_long` | That voice note is too long for me. Can you sum it up in writing? | Esa nota de voz es muy larga para mí. ¿Me lo resumes por escrito? |
+| `later_failed` | I could not finish what I was doing. Ask me again later. | No he podido terminar lo que estaba haciendo. Pídemelo otra vez más tarde. |
 | `pain_high` | A pain of {n} is a lot. If it does not ease with what you usually take, or it happens often, it is worth mentioning to your doctor. | Un dolor de {n} es mucho. Si no se te pasa con lo que sueles tomar, o te pasa a menudo, merece la pena comentarlo con tu médico. |
 | `only_her` | This is only for {name}. | Esto es solo para {name}. |
 | `toast_saved` | Noted: {what} | Apuntado: {what} |
@@ -657,8 +705,13 @@ with the same `{placeholders}`; every Spanish string containing `?` also contain
   Telegram being up.
 - `migrate_to_chat_id` (basic group to supergroup) is stored in `migrated_chat` and used from then on,
   with a warning to update `profile.yaml`.
-- At start the bot reads `getMe.can_read_all_group_messages`, logs it once, and keeps it for the
-  privacy-off rule (4.3).
+- At start the bot reads `getMe.can_read_all_group_messages`, then `getChatMember(chat_id=<group>,
+  user_id=<bot id>)`; either one (privacy mode off, or status `administrator`/`creator`) turns on the
+  privacy-off rule (4.3), and the log line says which.
+- `download(file_path, limit)` fetches a file `getFile` returned from
+  `https://api.telegram.org/file/bot<token>/<file_path>`. Like `call`, its errors are
+  `TelegramError("download", code, description)` with no URL in them; more than `limit` bytes raises
+  code 413 without reading the rest.
 
 ## 10. Apple Health import
 
@@ -701,8 +754,13 @@ prediction. `sct say --data <dir> --ask` sends today's card marked «(prueba)» 
   exception's class and HTTP status, and its `str()` only for the app's own exception classes, whose
   messages are reason codes; a plugin's or a library's exception text may quote her words or the
   assistant's and is never logged.
+- A voice note's transcript is her words: it is echoed to the chat and handed to the assistant, and
+  never logged. The log says `voice queued`, `voice heard` or `voice not heard: voice_failed`. A
+  `later` job's result and its exception text are never logged either (`later done 41s`, `later
+  failed: RuntimeError`).
 - `tests/test_privacy.py` runs a full scripted flow with `caplog` at DEBUG, including a record block
-  with an invalid symptom that contains a planted word, and asserts that none of the scripted texts,
+  with an invalid symptom that contains a planted word, a voice note whose transcript carries another,
+  and a `later` job that fails quoting her words, and asserts that none of the scripted texts,
   dates, symptom ids or the planted word appear. It runs once with a planted `log.info(text)` to show
   it goes red.
 - The public image holds only the package. `<data>` is a volume. `.dockerignore` excludes `data/`,
@@ -726,7 +784,7 @@ prediction. `sct say --data <dir> --ask` sends today's card marked «(prueba)» 
 | `test_records.py` | derive_starts reproduces the fictional log's flags; the gap rule at exactly 10 vs 11 days; `none` and `spotting` never start a cycle; replace-field semantics; delete; untouched lines byte-identical; validate_block refuses a future date, a date older than 90 days, pain 11, an unknown flow, an unknown symptom, an unknown key, 15 days, each with a reason code that does not contain the value; a Change with before == after is empty |
 | `test_cycle.py` | lengths outside 20..45 dropped; median and window; fewer than 3 lengths; period length; `bot_day` at 04:59 vs 05:01; DST days 2026-03-29 and 2026-10-25; each phase kind with its exit; day 8 is `period` only while days are missing |
 | `test_schedule.py` | quiet before the window; the ask at `ask_at`, not before, not twice, not after `ask_at + 2 h`; `ask_at` 23:00 with ticks at 22:59, 23:00, 00:30 and 01:00 the next day (no, yes, yes, no); skipped when today has a flow; a restart on the same day asks no second time; late asks daily; a 60-day frozen run counts the messages (at most one scheduled per bot day); missing days older than 3 never asked; the day-8 catch-up card once, with the catch-up wording, and nothing on day 8 when nothing is missing |
-| `test_bot.py` | the three-tap flow edits one message; a stale keyboard works by date; a callback dated 91 days back gets the toast and writes nothing; «Igual que ayer»; the picker; «Ya no sangro» closes and posts the closing line; a close undone and redone posts it again; day 7 line; pain 9 sends `pain_high` once, 9 again does not, 3 then 9 does; «Contarte más» sends selective force_reply with the mention; a reply triggers a turn with the turn shape of section 6; a message mentioning the bot does too; the record is written and the confirmation is built from the Change; a block whose days are unchanged posts no «Anotado:»; a future-dated block writes nothing; plugin raises, the keyboard comes and the line stays pending; `kept: false` posts `ai_down`, writes nothing, and the resend yields exactly one answer; 20 queued lines are capped to 10 and the next turn succeeds; `/nuevo` clears pending lines; a message arriving mid-turn is not dropped; an answer ending in "?" carries force_reply; plain group text from her ignored with privacy on, answered with privacy off, an admin's plain text ignored in both; a stranger's tap gets the toast; `/anotar ayer mucho 6 calambres`; `/estado` admin-only and every phase kind renders through a locale key; migration |
+| `test_bot.py` | the three-tap flow edits one message; a stale keyboard works by date; a callback dated 91 days back gets the toast and writes nothing; «Igual que ayer»; the picker; «Ya no sangro» closes and posts the closing line; a close undone and redone posts it again; day 7 line; pain 9 sends `pain_high` once, 9 again does not, 3 then 9 does; «Contarte más» sends selective force_reply with the mention; a reply triggers a turn with the turn shape of section 6; a message mentioning the bot does too; the record is written and the confirmation is built from the Change; a block whose days are unchanged posts no «Anotado:»; a future-dated block writes nothing; plugin raises, the keyboard comes and the line stays pending; `kept: false` posts `ai_down`, writes nothing, and the resend yields exactly one answer; 20 queued lines are capped to 10 and the next turn succeeds; `/nuevo` clears pending lines; a message arriving mid-turn is not dropped; an answer ending in "?" carries force_reply; plain group text from her ignored with privacy on, answered with privacy off, an admin's plain text ignored in both; a stranger's tap gets the toast; `/anotar ayer mucho 6 calambres`; `/estado` admin-only and every phase kind renders through a locale key; migration; a voice note with no mention is heard, echoed under the note and sent as `[voice note]`; an audio file and an admin's note in private; strangers' and other chats' notes ignored; `voice_off` (no plugin, no `transcribe`, `NotImplementedError`), `voice_failed` (plugin, empty text, download, `getFile`) and `voice_too_long` (on arrival and from `getFile`); a heard note is never heard twice; the echo is escaped and cut; a bot that is a group admin reads her plain text; `later` posts after the answer, fails with `later_failed`, says nothing when empty, runs one job at a time in order without holding turns, and never runs for a turn not kept |
 | `test_repo.py` | one commit after 60 s quiet for three taps; flush on SIGTERM; the human clone pushes a profile edit between the bot's commit and push, the bot rebases and both land; the human clone changes a line of `log.jsonl` the bot also changed: the pull completes, the bot's line wins, the human's other edits survive, the push lands; the remote refuses the push (a hook that exits 1): the commit stays, `/estado` counts it, the next flush pushes after the hook is removed (positive control); `/deshacer` on a dirty file restores HEAD with no commit, on a clean `log:` HEAD makes an `undo:` commit, and on an `undo:` HEAD says nothing to undo; commit messages contain no flow or symptom words; the token never appears in `git config` |
 | `test_applehealth.py` | a fictional export in a zip with a localised member name and a `_cda.xml` beside it; the three value forms; metadata child counted; `NotPresent` skipped; heaviest of a day; `IntermenstrualBleeding` to `spotting`; a `startDate` at 23:30 +0000 lands on the next day in the profile timezone; chat days never overwritten; a rerun is a no-op; `--dry-run` writes nothing |
 | `test_i18n.py`, `test_privacy.py` | sections 7 and 11 |
@@ -835,7 +893,7 @@ the new tag on its own.
 - **Built-in AI providers.** A plugin is twenty lines; leaving them out removes httpx and keeps one
   tested assistant path.
 - **Several tracked people per instance.** A second person is a second container and data directory.
-- **Voice notes, a web UI, published ports.**
+- **A web UI, published ports.**
 - **A stored state machine, a chat history table, an op journal, an undo table.** The log plus the
   date is the state; git is the journal and the undo; the assistant's own session is the chat memory.
 - **A morning nudge.** One scheduled message per day; the missed day rides on the next evening's card.

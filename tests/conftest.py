@@ -91,7 +91,10 @@ def data_repo(_data_repo_template, tmp_path, monkeypatch) -> DataRepo:
 
 class FakeTelegram:
     """Stands in for `Telegram`: records every call, hands out increasing message ids, and
-    raises a scripted `TelegramError` on demand. Safe across threads (the worker sends too)."""
+    raises a scripted `TelegramError` on demand. Safe across threads (the worker sends too).
+
+    `member` is what `getChatMember` answers for the bot; `files` maps a `file_id` to the bytes
+    `getFile` + `download` hand back (a missing one fails like Telegram does)."""
 
     def __init__(self, me: dict | None = None):
         self.me = me or {
@@ -103,6 +106,8 @@ class FakeTelegram:
         self.calls: list[tuple[str, dict]] = []
         self.errors: dict[str, list[TelegramError]] = {}
         self.updates: list = []  # what each getUpdates returns, in order: a list or a callable
+        self.member: dict = {"status": "member"}
+        self.files: dict[str, bytes] = {}
         self._lock = threading.Lock()
         self._next_id = 1000
 
@@ -120,6 +125,14 @@ class FakeTelegram:
                 raise pending.pop(0)
             if method == "getMe":
                 return dict(self.me)
+            if method == "getChatMember":
+                return dict(self.member)
+            if method == "getFile":
+                file_id = params["file_id"]
+                if file_id not in self.files:
+                    raise TelegramError(method, 400, "Bad Request: invalid file_id")
+                size = len(self.files[file_id])
+                return {"file_id": file_id, "file_size": size, "file_path": f"voice/{file_id}.oga"}
             if method == "getUpdates":
                 batch = self.updates.pop(0) if self.updates else []
                 return batch() if callable(batch) else batch
@@ -131,6 +144,18 @@ class FakeTelegram:
                     "text": params.get("text", ""),
                 }
             return True
+
+    def download(self, file_path: str, limit: int | None = None) -> bytes:
+        file_id = file_path.removeprefix("voice/").removesuffix(".oga")
+        with self._lock:
+            self.calls.append(("download", {"file_path": file_path, "limit": limit}))
+            pending = self.errors.get("download")
+            if pending:
+                raise pending.pop(0)
+        data = self.files[file_id]
+        if limit is not None and len(data) > limit:
+            raise TelegramError("download", 413, "file too large")
+        return data
 
     def of(self, method: str) -> list[dict]:
         with self._lock:

@@ -18,7 +18,7 @@ SuperCycleTracker is a menstrual cycle tracker that lives in a Telegram group. I
 - Logs flow, pain from 0 to 10, symptoms and a short note, from buttons or from her own words.
 - Predicts the next period from the logged history, and says so when a period closes.
 - Imports an Apple Health export to seed the history.
-- In the group it reads replies to the bot, answers to its questions, commands, and messages that mention it when Telegram delivers them. It also answers private chats with her or an admin.
+- In the group it reads replies to the bot, answers to its questions, commands, and messages that mention it when Telegram delivers them; as a group admin it reads all of her messages. Voice notes from her or an admin are always heard, when the plugin can transcribe. It also answers private chats with her or an admin.
 - Works without any AI: buttons and `/anotar` write records directly. An optional assistant plugin reads free text and answers questions.
 - Every string is translatable. English and Spanish ship.
 - Keeps the records in a private git repository you own, one commit per check-in, with `/deshacer` as undo.
@@ -107,9 +107,11 @@ The plugin is one Python file in the data directory, so the app never knows whic
 ```python
 def converse(turn: dict, settings: dict) -> dict | str: ...  # required
 def forget(conversation: str, settings: dict) -> None: ...  # optional, called by /nuevo
+# optional, the text of a voice note
+def transcribe(audio: bytes, mime: str, language: str, settings: dict) -> str: ...
 ```
 
-`turn` has `conversation` (what the plugin returned last time in this chat, or `None`), `rules`, `context`, `files` (`{"cycle/log.jsonl": <whole file>}`) and `new` (her lines the plugin has not kept yet). `settings` is the `assistant:` block minus `plugin` and `instructions`. Return a string, or `{"text", "conversation", "kept"}`. The text may end with one fenced `record` block. The app validates it, all or nothing, and writes the confirmation itself from what it saved. `kept: false` counts as a failed turn: nothing is applied and her lines go again with the next one. The plugin must return before `timeout_s`.
+`turn` has `conversation` (what the plugin returned last time in this chat, or `None`), `rules`, `context`, `files` (`{"cycle/log.jsonl": <whole file>}`) and `new` (her lines the plugin has not kept yet). `settings` is the `assistant:` block minus `plugin` and `instructions`. Return a string, or `{"text", "conversation", "kept", "later"}`; `later` is an optional callable the app runs on a background thread after posting the text, posting the string it returns. The text may end with one fenced `record` block. The app validates it, all or nothing, and writes the confirmation itself from what it saved. `kept: false` counts as a failed turn: nothing is applied and her lines go again with the next one. The plugin must return before `timeout_s`.
 
 [`tests/fixtures/fake_plugin.py`](tests/fixtures/fake_plugin.py) is a scripted example. The full design is in [`docs/DESIGN.md`](docs/DESIGN.md).
 
