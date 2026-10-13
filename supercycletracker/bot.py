@@ -56,6 +56,7 @@ ASK_WINDOW = timedelta(hours=2)  # a bot that was down at ask_at still asks up t
 ASK_EARLIEST = clock_time(5, 0)  # a bot day starts at 05:00, so ask_at must not be earlier
 POLL_S = 20  # getUpdates long poll
 WAIT_409_S = 30  # another poller holds the token: wait and keep the offset
+TICK_S = 60  # a long wait ticks at least this often: the healthcheck allows 180 s
 BACKOFF_MIN_S, BACKOFF_MAX_S = 5, 300  # 5xx and network failures
 MENU = ("hoy", "resumen", "anotar", "deshacer", "ayuda")  # the commands she sees in the menu
 
@@ -98,6 +99,9 @@ class Profile:
         birth = raw.get("birth_date")
         if isinstance(birth, str):
             birth = date.fromisoformat(birth)
+        admins = tg.get("admins") or {}
+        if not isinstance(admins, Mapping):
+            raise ValueError("bad_profile")  # noqa: TRY004
         username = tg.get("username")
         block = raw.get("assistant")
         return cls(
@@ -109,7 +113,7 @@ class Profile:
             chat_id=_int(tg.get("chat_id")),
             user_id=_int(tg.get("user_id")),
             username=str(username).lstrip("@") if username else None,
-            admins={int(k): str(v) for k, v in (tg.get("admins") or {}).items()},
+            admins={int(k): str(v) for k, v in admins.items()},
             assistant=dict(block) if isinstance(block, Mapping) else None,
         )
 
@@ -322,6 +326,9 @@ class Bot:
         self.alive = alive  # touched on every tick, for the container healthcheck
         self.polling = False  # inside getUpdates: SIGTERM may interrupt it
         self._backoff = BACKOFF_MIN_S
+        # /nuevo bumps a chat's count; a turn that started before it does not store its id
+        self._resets: Counter[int] = Counter()
+        self._conv_lock = threading.Lock()
         # Spanish names first, English aliases second; the value says who may use it
         self.commands: dict[str, tuple[Callable, frozenset[str]]] = {}
         both, admins = frozenset({HER, ADMIN}), frozenset({ADMIN})
@@ -1054,16 +1061,23 @@ class Bot:
             git = t("status_git_unpushed", n=unpushed)
         elif self.repo.remote_ok is False:
             git = t("status_git_down")
+        elif unpushed is None:  # no upstream to count against: not known to be synced
+            git = t("status_git_unknown")
         else:
             git = t("status_git_ok")
         return t("status", phase=phase, asked=asked, ai=ai, git=git)
 
     def cmd_nuevo(self, msg: Mapping, rest: str, role: str) -> None:
-        """/nuevo (admins): drop the pending lines and the assistant conversation. A plugin
-        whose `forget` raises keeps the conversation and the admin is told."""
+        """/nuevo (admins): drop the pending lines and the assistant conversation, always, so
+        an admin can always reset a chat. The plugin's `forget` is best effort: a broken id it
+        refuses must not keep the chat stuck on it. A turn already running does not store its
+        conversation afterwards."""
         chat = msg["chat"]["id"]
+        with self._conv_lock:
+            self._resets[chat] += 1
+            conversation = self.kv.get(f"conv:{chat}")
+            self.kv.delete(f"conv:{chat}")
         self.kv.delete(f"pending:{chat}")
-        conversation = self.kv.get(f"conv:{chat}")
         if conversation and self.has_assistant:
             block = self.profile.assistant or {}
             try:
@@ -1072,9 +1086,6 @@ class Bot:
                 )
             except Exception as e:  # noqa: BLE001 - the plugin may raise anything
                 log.warning("forget failed: %s", safe(e))
-                self.send(chat, self.t("new_failed"))
-                return
-        self.kv.delete(f"conv:{chat}")
         self.send(chat, self.t("new_conversation"))
 
     def cmd_presentacion(self, msg: Mapping, rest: str, role: str) -> None:
@@ -1145,11 +1156,24 @@ class Bot:
             self.repo.flush()
         except Exception as e:  # noqa: BLE001
             log.warning("git sync failed: %s", safe(e))
+        self.heartbeat()
+
+    def heartbeat(self) -> None:
         if self.alive is not None:
             try:
                 self.alive.touch()
             except OSError as e:
                 log.warning("heartbeat failed: %s", safe(e))
+
+    @staticmethod
+    def wait(stop: threading.Event, seconds: float, between: Callable[[], None]) -> None:
+        """Wait `seconds` or until `stop`, calling `between` every `TICK_S` on the way: a
+        backoff of up to 300 s must not stop the heartbeat, the scheduled ask or the git sync
+        while only Telegram is down."""
+        while seconds > 0 and not stop.wait(min(seconds, TICK_S)):
+            seconds -= TICK_S
+            if seconds > 0:
+                between()
 
     def poll_once(self) -> float:
         """One `getUpdates` and its updates; returns how long to wait before the next one.
@@ -1198,7 +1222,7 @@ class Bot:
                 if e.code == 401:
                     raise
                 log.warning("getMe failed: %s", safe(e))
-                stop.wait(delay)
+                self.wait(stop, delay, self.heartbeat)
                 delay = min(delay * 2, BACKOFF_MAX_S)
         self.repo.check_remote()
         self.set_commands()
@@ -1210,7 +1234,7 @@ class Bot:
                     break
                 self.tick()
                 if wait:
-                    stop.wait(wait)
+                    self.wait(stop, wait, self.tick)
         finally:
             self.repo.flush(force=True)
             log.info("stopped")
@@ -1235,6 +1259,9 @@ class Bot:
         started = time.monotonic()
         now = self.now()
         today = cycle.bot_day(now, p.timezone)
+        with self._conv_lock:
+            resets = self._resets[chat]
+            conversation = self.kv.get(f"conv:{chat}")
         try:
             with DATA_LOCK:
                 try:
@@ -1257,7 +1284,7 @@ class Bot:
             )
             rules = assistant.rules(p.name, p.language, admins, block_cfg.get("instructions") or "")
             turn = assistant.turn(
-                self.kv.get(f"conv:{chat}"),
+                conversation,
                 rules,
                 context,
                 log_text,
@@ -1276,10 +1303,13 @@ class Bot:
             return
         log.info("ai turn ok %ds", round(time.monotonic() - started))
         self.last_ai = self.now()
-        if reply.conversation:
-            self.kv.set(f"conv:{chat}", reply.conversation)
-        else:
-            self.kv.delete(f"conv:{chat}")
+        with self._conv_lock:
+            if self._resets[chat] != resets:
+                log.info("conversation dropped by /nuevo during the turn")
+            elif reply.conversation:
+                self.kv.set(f"conv:{chat}", reply.conversation)
+            else:
+                self.kv.delete(f"conv:{chat}")
         text, block = assistant.extract(reply.text)
         if text and not self.say(chat, text, lines[-1]["id"]):
             # she never saw the answer: a failed turn, so the buttons and the lines stay

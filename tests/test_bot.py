@@ -1078,7 +1078,7 @@ def test_nuevo_clears_the_pending_lines_and_the_conversation(make_bot):
     assert [x["content"].rsplit("] ", 1)[1] for x in mod.CALLS[-1]["turn"]["new"]] == ["tres"]
 
 
-def test_nuevo_is_for_admins_and_a_failed_forget_keeps_the_conversation(make_bot):
+def test_nuevo_is_for_admins_and_a_failed_forget_still_drops_the_conversation(make_bot):
     bot = make_bot()
     mod = plugin(bot)
     say(bot, "hola", reply_to=QUESTION)
@@ -1086,8 +1086,71 @@ def test_nuevo_is_for_admins_and_a_failed_forget_keeps_the_conversation(make_bot
     assert bot.kv.get(f"conv:{GROUP}") == "conv-1"
     mod.forget = lambda conversation, settings: (_ for _ in ()).throw(RuntimeError("busy"))
     say(bot, "/new", user=ADMIN)
+    assert bot.kv.get(f"conv:{GROUP}") is None
+    assert bot.tg.texts()[-1] == "Empiezo una conversación nueva. Lo apuntado sigue igual."
+    say(bot, "otra", reply_to=QUESTION)
+    assert mod.CALLS[-1]["turn"]["conversation"] is None
+
+
+def test_nuevo_during_a_turn_is_not_undone_when_the_turn_ends(make_bot):
+    bot = make_bot()
+    mod = plugin(bot)
+    say(bot, "hola", reply_to=QUESTION)
     assert bot.kv.get(f"conv:{GROUP}") == "conv-1"
-    assert bot.tg.texts()[-1].startswith("No he podido borrar la conversación del asistente")
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(turn):
+        entered.set()
+        release.wait(5)
+        return {"text": "tarde", "conversation": "conv-1", "kept": True}
+
+    mod.REPLIES[:] = [slow]
+    bot.handle(
+        {
+            "message": {
+                "message_id": 3,
+                "from": {"id": HER},
+                "text": "uno",
+                "chat": {"id": GROUP, "type": "supergroup"},
+                "reply_to_message": {"from": {"id": BOT_ID}, "text": "x"},
+            }
+        }
+    )
+    assert entered.wait(5)
+    nuevo = {"message_id": 4, "from": {"id": ADMIN}, "text": "/nuevo"}
+    bot.handle({"message": {**nuevo, "chat": {"id": GROUP, "type": "supergroup"}}})
+    assert bot.kv.get(f"conv:{GROUP}") is None
+    release.set()
+    bot.worker.join_idle()
+    assert mod.FORGOTTEN == ["conv-1"]
+    assert bot.kv.get(f"conv:{GROUP}") is None
+    say(bot, "dos", reply_to=QUESTION)
+    assert mod.CALLS[-1]["turn"]["conversation"] is None
+
+
+def test_estado_without_an_upstream_does_not_claim_synced(make_bot):
+    bot = make_bot()
+    bot.repo._git("branch", "--unset-upstream")
+    bot.repo._git("commit", "--allow-empty", "--quiet", "-m", "local")
+    say(bot, "/estado", user=ADMIN)
+    assert bot.tg.texts()[-1].endswith(
+        "Datos: desconocido, no hay rama remota con la que comparar."
+    )
+
+
+def test_a_long_wait_ticks_every_minute_so_the_heartbeat_stays_fresh():
+    class Stop:
+        def __init__(self):
+            self.waits = []
+
+        def wait(self, timeout):
+            self.waits.append(timeout)
+            return False
+
+    for seconds, waits, ticks in ((300, [60] * 5, 4), (160, [60, 60, 40], 2), (30, [30], 0)):
+        stop, calls = Stop(), []
+        Bot.wait(stop, seconds, lambda calls=calls: calls.append(1))
+        assert (stop.waits, len(calls)) == (waits, ticks)
 
 
 def test_ayuda_and_presentacion(make_bot):

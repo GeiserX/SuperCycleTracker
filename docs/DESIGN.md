@@ -319,7 +319,7 @@ Nothing is set in BotFather, which this call would overwrite anyway.
 | `/anotar` (`/log`) `<cuándo> <cuánto> [dolor] [síntomas…]` | her, admins | deterministic, no AI: `/anotar ayer mucho 6 calambres hinchazón`. `cuándo` is hoy, ayer, anteayer, a weekday (the most recent past one), `D/M` or `YYYY-MM-DD`; `cuánto` is nada, poco, normal, mucho; an integer 0..10 is pain; the rest are symptom labels matched by prefix |
 | `/deshacer` (`/undo`) | her, admins | undoes the last check-in: the uncommitted batch, else the last `log:` commit (2.2) |
 | `/estado` (`/status`) | admins | phase, whether today was asked and answered, when the assistant last answered, git sync state |
-| `/nuevo` (`/new`) | admins | drop the pending lines and the assistant conversation; the next turn starts fresh. If the plugin's `forget` raises, the conversation stays and the admin is told (`new_failed`) |
+| `/nuevo` (`/new`) | admins | drop the assistant conversation; the next turn starts fresh |
 | `/presentacion` (`/about`) | admins | posts the introduction text once, when an admin asks for it |
 | `/ayuda` (`/help`) | anyone allowed | the list |
 
@@ -584,11 +584,10 @@ locale. English source strings and their Spanish translations:
 | `phase_no_history` / `phase_quiet` / `phase_waiting` / `phase_late` / `phase_period` | no history / quiet until {ws} / waiting ({ws} to {we}) / late since {we} / period day {n} | sin historial / tranquila hasta el {ws} / esperando (del {ws} al {we}) / con retraso desde el {we} / regla, día {n} |
 | `status_asked` / `status_answered` / `status_not_asked` | asked, no answer yet / asked and answered / not asked yet | preguntado, sin respuesta / preguntado y respondido / aún no preguntado |
 | `status_ai_ok` / `status_ai_never` / `status_ai_none` | last answer {ago} ago / no answer since start / no assistant configured | última respuesta hace {ago} / sin respuesta desde el arranque / sin asistente |
-| `status_git_ok` / `status_git_unpushed` / `status_git_down` | synced / {n} commit(s) not pushed / remote unreachable at start | sincronizado / {n} commit(s) sin subir / remoto inaccesible al arrancar |
+| `status_git_ok` / `status_git_unpushed` / `status_git_down` / `status_git_unknown` | synced / {n} commit(s) not pushed / remote unreachable at start / unknown, no upstream branch to compare with | sincronizado / {n} commit(s) sin subir / remoto inaccesible al arrancar / desconocido, no hay rama remota con la que comparar |
 | `anotar_usage` | Usage: /anotar <when> <flow> [pain 0-10] [symptoms…]. Example: /anotar ayer mucho 6 calambres | Uso: /anotar <cuándo> <cuánto> [dolor 0-10] [síntomas…]. Ejemplo: /anotar ayer mucho 6 calambres |
 | `anotar_saved` | Noted without the assistant: {summary}. If that is wrong, /deshacer. | Anotado sin el asistente: {summary}. Si no es así, /deshacer. |
 | `new_conversation` | Starting a fresh conversation. What is noted stays. | Empiezo una conversación nueva. Lo apuntado sigue igual. |
-| `new_failed` | I could not drop the assistant's conversation, so it stays as it was. Try again in a minute. | No he podido borrar la conversación del asistente, así que sigue como estaba. Prueba otra vez en un minuto. |
 | `test_mark` | (test) | (prueba) |
 | `menu` | the descriptions of the five commands in the menu | idem |
 | buttons | Yes, light · Yes, medium · Yes, heavy · Yes, another day · Not yet · Light · Medium · Heavy · Same as yesterday · It stopped · It had stopped that day · I don't remember · Tell you more · Other: I'll write it · Done · Fix · Back | Sí, poco · Sí, normal · Sí, mucho · Sí, otro día · Todavía no · Poco · Normal · Mucho · Igual que ayer · Ya no sangro · Ese día ya no sangraba · No me acuerdo · Contarte más · Otro: escríbemelo · Listo · Corregir · Volver |
@@ -653,7 +652,9 @@ with the same `{placeholders}`; every Spanish string containing `?` also contain
   worker), then `tick(now)`: the scheduled ask, `repo.flush()`, and a touch of `/tmp/sct.alive` for the
   container healthcheck.
 - 409 on `getUpdates` (another poller) waits 30 s and keeps the offset; 5xx and network errors back off
-  5 s to 300 s.
+  5 s to 300 s. A wait longer than 60 s runs `tick()` every 60 s (the `getMe` retries at start touch
+  the heartbeat only), so the healthcheck's 180 s, the scheduled ask and the git sync do not depend on
+  Telegram being up.
 - `migrate_to_chat_id` (basic group to supergroup) is stored in `migrated_chat` and used from then on,
   with a warning to update `profile.yaml`.
 - At start the bot reads `getMe.can_read_all_group_messages`, logs it once, and keeps it for the
