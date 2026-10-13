@@ -1,0 +1,22 @@
+name: Docker Hub Description
+
+on:
+  push:
+    branches: [main]
+    paths: [README.md]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  update-description:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: drumsergio/supercycletracker
