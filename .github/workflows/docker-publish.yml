@@ -1,31 +1,65 @@
 name: Docker
+# The image is published from main: a merge that bumps __version__ builds
+# drumsergio/supercycletracker:<version> and then tags the commit v<version>.
+# A tag is an output of this workflow, never an input. When the tag already
+# exists the run does nothing, so every other push to main is a no-op.
 on:
   push:
-    tags: ['v*']
+    branches: [main]
 permissions:
   contents: read
+concurrency:
+  group: docker-publish
+  cancel-in-progress: false
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # only the last step uses it, to create the tag
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          persist-credentials: false
       - id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-      - name: Check the tag matches the package version
+        name: Read the package version
+        run: |
+          VERSION=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' supercycletracker/__init__.py)
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad __version__: '$VERSION'"; exit 1; }
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+      - id: tag
+        name: Check whether v<version> is already released
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          grep -qxF "__version__ = \"$VERSION\"" supercycletracker/__init__.py
-      - uses: docker/build-push-action@v7
+          set +e
+          git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" > /dev/null
+          code=$?
+          set -e
+          case $code in
+            0) echo "exists=true" >> "$GITHUB_OUTPUT"; echo "v$VERSION is already released; nothing to do" ;;
+            2) echo "exists=false" >> "$GITHUB_OUTPUT"; echo "v$VERSION is new; publishing" ;;
+            *) echo "::error::git ls-remote failed with $code"; exit "$code" ;;
+          esac
+      - if: steps.tag.outputs.exists == 'false'
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - if: steps.tag.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - if: steps.tag.outputs.exists == 'false'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - if: steps.tag.outputs.exists == 'false'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
           tags: drumsergio/supercycletracker:${{ steps.version.outputs.VERSION }}
+      - if: steps.tag.outputs.exists == 'false'
+        name: Tag the released commit
+        # A tag created with the workflow's own token starts no other workflow.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/v$VERSION" -f "sha=$GITHUB_SHA"
