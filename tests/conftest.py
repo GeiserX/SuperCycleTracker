@@ -1,14 +1,16 @@
 import os
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from supercycletracker import records
 from supercycletracker.records import Day
+from supercycletracker.telegram import TelegramError
 
 HUMAN = ["-c", "user.name=Someone", "-c", "user.email=someone@example.invalid"]
 ISOLATED = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
@@ -85,3 +87,63 @@ def data_repo(_data_repo_template, tmp_path, monkeypatch) -> DataRepo:
     root = tmp_path / "repos"
     shutil.copytree(_data_repo_template, root, symlinks=True)
     return DataRepo(remote=root / "remote.git", data=root / "data", human=root / "human")
+
+
+class FakeTelegram:
+    """Stands in for `Telegram`: records every call, hands out increasing message ids, and
+    raises a scripted `TelegramError` on demand. Safe across threads (the worker sends too)."""
+
+    def __init__(self, me: dict | None = None):
+        self.me = me or {
+            "id": 999,
+            "is_bot": True,
+            "username": "example_cycle_bot",
+            "can_read_all_group_messages": False,
+        }
+        self.calls: list[tuple[str, dict]] = []
+        self.errors: dict[str, list[TelegramError]] = {}
+        self._lock = threading.Lock()
+        self._next_id = 1000
+
+    def fail_next(self, method: str, code: int, description: str, parameters=None) -> None:
+        self.errors.setdefault(method, []).append(
+            TelegramError(method, code, description, parameters)
+        )
+
+    def call(self, method: str, **params):
+        params = {k: v for k, v in params.items() if v is not None}
+        with self._lock:
+            self.calls.append((method, params))
+            pending = self.errors.get(method)
+            if pending:
+                raise pending.pop(0)
+            if method == "getMe":
+                return dict(self.me)
+            if method == "sendMessage":
+                self._next_id += 1
+                return {
+                    "message_id": self._next_id,
+                    "chat": {"id": params["chat_id"]},
+                    "text": params.get("text", ""),
+                }
+            return True
+
+    def of(self, method: str) -> list[dict]:
+        with self._lock:
+            return [p for m, p in self.calls if m == method]
+
+    def texts(self) -> list[str]:
+        return [p["text"] for p in self.of("sendMessage")]
+
+
+class Clock:
+    """The bot's `now`: a fixed aware datetime moved by hand."""
+
+    def __init__(self, start: datetime):
+        self.at = start
+
+    def __call__(self) -> datetime:
+        return self.at
+
+    def advance(self, **kw) -> None:
+        self.at += timedelta(**kw)

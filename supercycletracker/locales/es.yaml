@@ -33,6 +33,8 @@ no_ai: "Sin el asistente no entiendo mensajes escritos. Puedes anotarlo con los 
 pain_high: "Un dolor de {n} es mucho. Si no se te pasa con lo que sueles tomar, o te pasa a menudo, merece la pena comentarlo con tu médico."
 only_her: "Esto es solo para {name}."
 toast_saved: "Apuntado: {what}"
+toast_old: "Esa tarjeta es demasiado antigua, así que no he guardado nada."
+toast_error: "Algo ha fallado, así que no he guardado nada."
 undo_done: "Deshecho: {what}."
 undo_none: "No hay nada que deshacer."
 

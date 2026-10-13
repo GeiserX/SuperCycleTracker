@@ -35,6 +35,8 @@ no_ai: "Without the assistant I cannot read written messages. You can note it wi
 pain_high: "A pain of {n} is a lot. If it does not ease with what you usually take, or it happens often, it is worth mentioning to your doctor."
 only_her: "This is only for {name}."
 toast_saved: "Noted: {what}"
+toast_old: "That card is too old, so I saved nothing."
+toast_error: "Something went wrong, so I saved nothing."
 undo_done: "Undone: {what}."
 undo_none: "Nothing to undo."
 
