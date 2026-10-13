@@ -1,3 +1,4 @@
+import http.client
 import io
 import json
 import traceback
@@ -54,8 +55,16 @@ def too_many(retry_after):
     )
 
 
+def chain(err: BaseException | None):
+    """The error and every exception attached to it, shown in a traceback or not."""
+    while err is not None:
+        yield err
+        err = err.__cause__ or err.__context__
+
+
 def assert_clean(err: BaseException):
     texts = [str(err), repr(err), safe(err), "".join(traceback.format_exception(err))]
+    texts += [f"{e!s} {e!r}" for e in chain(err)]
     for text in texts:
         assert TOKEN not in text
         assert "api.telegram.org" not in text
@@ -93,6 +102,19 @@ def test_429_wait_is_capped_and_retried_twice_at_most():
     assert sleeps == [60, 3]
     assert len(http.requests) == 3
     assert info.value.code == 429 and info.value.retry_after == 3
+
+
+def test_429_with_a_non_json_body_is_retried_too():
+    tg, http, sleeps = client((429, b"<html>Too Many</html>"), (200, {"ok": True, "result": 1}))
+    assert tg.call("getMe") == 1
+    assert sleeps == [1]
+    assert len(http.requests) == 2
+
+
+def test_a_stray_newline_after_the_token_is_dropped():
+    http = FakeHTTP((200, {"ok": True, "result": 1}))
+    Telegram(TOKEN + "\n", urlopen=http).call("getMe")
+    assert http.requests[0][0].full_url.endswith(f"/bot{TOKEN}/getMe")
 
 
 def test_429_in_a_200_body_is_handled_the_same():
@@ -146,6 +168,9 @@ def test_errors_keep_code_description_and_parameters():
         urllib.error.URLError(f"cannot reach https://api.telegram.org/bot{TOKEN}/getMe"),
         TimeoutError(f"timed out on https://api.telegram.org/bot{TOKEN}/getMe"),
         ConnectionResetError(f"reset by https://api.telegram.org/bot{TOKEN}/getMe"),
+        http.client.InvalidURL(
+            f"URL can't contain control characters. 'https://api.telegram.org/bot{TOKEN}'"
+        ),
     ],
 )
 def test_error_text_never_holds_the_token(answer):
@@ -171,6 +196,8 @@ def test_safe_strips_the_token_and_foreign_messages():
     assert safe(http_error) == "HTTPError 500"
     assert safe(ValueError("me ha bajado hoy")) == "ValueError"  # a foreign message may quote her
     assert safe(RuntimeError(url)) == "RuntimeError"
+    plugin_error = type("PluginErr", (Exception,), {"__module__": "supercycletracker_plugin_x"})
+    assert safe(plugin_error("me duele mucho")) == "PluginErr"  # not the app's own package
     assert TOKEN not in safe(TelegramError("getMe", 0, f"echo {TOKEN}"))
     assert (
         safe(TelegramError("getMe", 401, "Unauthorized"))
@@ -179,6 +206,16 @@ def test_safe_strips_the_token_and_foreign_messages():
 
 
 def test_safe_check_can_fail():
-    """Positive control: the assertion helper above does catch a token in an error."""
+    """Positive control: the assertion helper above does catch a token in an error, also one
+    hidden on `__context__` behind `from None`."""
     with pytest.raises(AssertionError):
         assert_clean(RuntimeError(f"https://api.telegram.org/bot{TOKEN}/getMe"))
+    try:
+        try:
+            raise OSError(f"https://api.telegram.org/bot{TOKEN}/getMe")
+        except OSError:
+            raise TelegramError("getMe", 0, "OSError") from None
+    except TelegramError as e:
+        hidden = e
+    with pytest.raises(AssertionError):
+        assert_clean(hidden)

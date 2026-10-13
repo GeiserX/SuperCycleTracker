@@ -48,8 +48,8 @@ def safe(e: BaseException) -> str:
     """An exception as text for the service log. The app's own exceptions carry reason codes and
     keep their text; anything else keeps only its class and HTTP status, because a library's or
     a plugin's message may quote a URL with the token, her words or the assistant's."""
-    name = type(e).__name__
-    if type(e).__module__.startswith("supercycletracker"):
+    name, module = type(e).__name__, type(e).__module__
+    if module == "supercycletracker" or module.startswith("supercycletracker."):
         text = f"{name}: {e}"
     else:
         status = getattr(e, "code", None)
@@ -67,7 +67,7 @@ class Telegram:
         urlopen: Callable = urllib.request.urlopen,
         sleep: Callable[[float], None] = time.sleep,
     ):
-        self._url = f"{base}/bot{token}/"
+        self._url = f"{base}/bot{token.strip()}/"  # a secrets file often ends in a newline
         self._urlopen = urlopen
         self._sleep = sleep
 
@@ -98,16 +98,22 @@ class Telegram:
         raise AssertionError("unreachable")  # pragma: no cover
 
     def _post(self, method: str, body: bytes, timeout: float) -> dict:
-        request = urllib.request.Request(
-            self._url + method, data=body, headers={"Content-Type": "application/json"}
-        )
-        status = 0
+        """The response body as a dict. A body that is not a JSON object (an HTML page from a
+        proxy) becomes `{ok: false, error_code: <status>}`, so `call` treats every 429 alike.
+
+        No exception raised here carries another one: the original may quote the URL with the
+        token (an `InvalidURL` does, when the token has a stray character), and `from None`
+        would still leave it on `__context__`. So the failure is noted inside the `except` and
+        raised after it."""
+        status, failure = 0, None
         try:
+            request = urllib.request.Request(
+                self._url + method, data=body, headers={"Content-Type": "application/json"}
+            )
             with self._urlopen(request, timeout=timeout) as response:
                 raw = response.read()
         except urllib.error.HTTPError as e:
-            # Telegram answers errors with an HTTP status and a JSON body; read the body. The
-            # HTTPError itself holds the URL, so it never travels on (`from None` below).
+            # Telegram answers errors with an HTTP status and a JSON body; read the body.
             status = e.code
             try:
                 raw = e.read()
@@ -115,12 +121,15 @@ class Telegram:
                 raw = b""
             finally:
                 e.close()
-        except (urllib.error.URLError, OSError, http.client.HTTPException) as e:
-            raise TelegramError(method, 0, type(e).__name__) from None
+        except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as e:
+            failure = type(e).__name__  # ValueError: a malformed URL, quoted in full
+        if failure is not None:
+            raise TelegramError(method, 0, failure)
         try:
             payload = json.loads(raw)
         except ValueError:
             payload = None
         if not isinstance(payload, dict):
-            raise TelegramError(method, status, f"HTTP {status}" if status else "bad response")
+            description = f"HTTP {status}" if status else "bad response"
+            return {"ok": False, "error_code": status, "description": description}
         return payload
