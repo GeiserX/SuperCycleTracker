@@ -11,6 +11,7 @@ permissions:
 concurrency:
   group: docker-publish
   cancel-in-progress: false
+  queue: max # keep every pending run, so no version bump is dropped
 jobs:
   publish:
     runs-on: ubuntu-latest

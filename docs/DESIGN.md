@@ -824,9 +824,10 @@ that commit with the workflow's own token. When the tag exists, the run does not
 is one merged change that bumps `__version__` (`pyproject.toml` reads it from there); a change that
 keeps the version ships nothing. The tag is an output: pushing one by hand publishes nothing (and
 makes the workflow skip that version), and a tag created by the workflow's token starts no other
-workflow. Runs are serialized, so two quick merges never build the same version twice. If the image
-push succeeds and the tagging step fails, re-running the workflow rebuilds the same version and tags
-it. A deployment that pins the image by version (a dependency bot watching the registry) picks up
+workflow. Runs are serialized and queued in order (`queue: max`), so two quick merges never build
+the same version twice and a version bump waiting behind a running build is never dropped. If the
+image push succeeds and the tagging step fails, re-running the workflow rebuilds the same version
+and tags it. A deployment that pins the image by version (a dependency bot watching the registry) picks up
 the new tag on its own.
 
 ## 15. Left out on purpose
