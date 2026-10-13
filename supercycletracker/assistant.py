@@ -11,10 +11,12 @@ the caller, which logs its class only (`telegram.safe`).
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import re
 import statistics
+import sys
 import threading
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -55,12 +57,22 @@ class PluginError(Exception):
 @lru_cache(maxsize=8)
 def _module(path: str, mtime_ns: int) -> ModuleType:
     """One module per plugin file version: state the plugin keeps at module level survives
-    between calls, and an edited file (a data repository pull) is loaded again."""
-    spec = importlib.util.spec_from_file_location(f"sct_plugin_{Path(path).stem}", path)
+    between calls, and an edited file (a data repository pull) is loaded again.
+
+    The module sits in `sys.modules` under a name unique to this version before it runs, as a
+    normal import does: `dataclasses` and `typing` look the module up there by name."""
+    digest = hashlib.sha256(path.encode()).hexdigest()[:12]
+    name = f"sct_plugin_{digest}_{mtime_ns}"
+    spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise PluginError("plugin_load_failed")
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    sys.modules[name] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
     return mod
 
 
@@ -129,13 +141,21 @@ def reply(out: object) -> Reply:
     raise PluginError("bad_reply")
 
 
+_ABANDONED: dict[str, threading.Thread] = {}  # per plugin path: a call that outlived its wait
+
+
 def converse(data: str | Path, rel: str | None, turn: dict, plugin_settings: dict) -> Reply:
     """Run the plugin's `converse` and wait at most `timeout_s`.
 
     The call runs in its own daemon thread because the app cannot stop a plugin: one that
     outlives the wait is abandoned and the turn counts as failed (`PluginError("timeout")`).
-    The plugin's own exception is raised as it is."""
+    Until that call returns, the plugin is not called again (`PluginError("plugin_busy")`), so
+    it never runs two turns at once. The plugin's own exception is raised as it is."""
     fn = function(data, rel, "converse")
+    key = str((Path(data) / str(rel)).resolve())
+    previous = _ABANDONED.get(key)
+    if previous is not None and previous.is_alive():
+        raise PluginError("plugin_busy")
     box: dict = {}
 
     def run():
@@ -148,7 +168,9 @@ def converse(data: str | Path, rel: str | None, turn: dict, plugin_settings: dic
     thread.start()
     thread.join(timeout_s(plugin_settings))
     if thread.is_alive():
+        _ABANDONED[key] = thread
         raise PluginError("timeout")
+    _ABANDONED.pop(key, None)
     if "error" in box:
         raise box["error"]
     return reply(box.get("out"))

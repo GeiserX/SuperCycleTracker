@@ -9,7 +9,7 @@ import pytest
 from conftest import Clock, FakeTelegram
 
 from supercycletracker import assistant, records
-from supercycletracker.bot import Bot, parse_callback
+from supercycletracker.bot import TEXT_MAX, Bot, parse_callback, split_text
 from supercycletracker.records import Day
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -84,7 +84,9 @@ def tap(bot, data, user=HER, message_id=1, chat=GROUP):
 _ids = iter(range(5000, 10_000))
 
 
-def say(bot, text, user=HER, chat=GROUP, reply_to=None, entities=None, private=False):
+def say(
+    bot, text, user=HER, chat=GROUP, reply_to=None, entities=None, private=False, reply_from=BOT_ID
+):
     message = {
         "message_id": next(_ids),
         "from": {"id": user},
@@ -92,7 +94,11 @@ def say(bot, text, user=HER, chat=GROUP, reply_to=None, entities=None, private=F
         "text": text,
     }
     if reply_to is not None:
-        message["reply_to_message"] = {"message_id": 1, "from": {"id": BOT_ID}, "text": reply_to}
+        message["reply_to_message"] = {
+            "message_id": 1,
+            "from": {"id": reply_from},
+            "text": reply_to,
+        }
     if entities:
         message["entities"] = entities
     bot.handle({"update_id": 2, "message": message})
@@ -220,6 +226,27 @@ def test_a_future_callback_writes_nothing(make_bot):
     bot = make_bot()
     tap(bot, "f:20270305:heavy")
     assert day(bot, date(2027, 3, 5)) is None
+    assert toasts(bot) == ["Algo ha fallado, así que no he guardado nada."]  # not «too old»
+
+
+def test_fix_reopens_the_flow_step_with_a_question_for_a_day_already_answered(make_bot):
+    bot = make_bot()  # 2027-03-04, period day 4; 03-03 is answered
+    before = bot.repo.log_path.read_bytes()
+    tap(bot, "fix:20270303")
+    past = edits(bot)[-1]
+    assert past["text"] == (
+        "@lucia_example, vamos a corregir el miércoles 3 de marzo. ¿Cómo lo apunto?"
+    )
+    assert buttons(past["reply_markup"])[:3] == [
+        "f:20270303:light",
+        "f:20270303:medium",
+        "f:20270303:heavy",
+    ]
+    tap(bot, "fix:20270304")
+    now = edits(bot)[-1]
+    assert now["text"] == "@lucia_example, vamos a corregir el jueves 4 de marzo. ¿Cómo lo apunto?"
+    assert "f:20270304:none" in buttons(now["reply_markup"])
+    assert bot.repo.log_path.read_bytes() == before
 
 
 def test_same_as_yesterday_copies_flow_pain_and_symptoms_in_one_tap(make_bot):
@@ -499,6 +526,22 @@ def test_a_none_that_closes_the_period_says_so(make_bot):
     assert texts[2].startswith("Cierro esta regla: 3 días")
 
 
+def test_a_note_alone_reads_as_a_note_line(make_bot):
+    bot = make_bot()
+    plugin(bot).REPLIES[:] = [
+        record(
+            "Apuntado.",
+            {"date": "2027-03-03", "note": "una nota de ejemplo"},
+            {"date": "2027-03-04", "note": "otra nota de ejemplo"},
+        )
+    ]
+    say(bot, "apúntalo como nota", reply_to=QUESTION)
+    assert bot.tg.texts()[1] == (
+        "Anotado:\n• miércoles 3 de marzo: nota actualizada\n• jueves 4 de marzo: nota actualizada"
+    )
+    assert day(bot, date(2027, 3, 4)).note == "otra nota de ejemplo"
+
+
 def test_a_block_that_changes_nothing_posts_no_confirmation(make_bot):
     bot = make_bot()
     plugin(bot).REPLIES[:] = [record("Ya lo tenía.", {"date": "2027-03-03", "flow": "light"})]
@@ -520,6 +563,7 @@ def test_a_future_dated_block_writes_nothing(make_bot, caplog):
     assert buttons(refusal["reply_markup"])[0] == "f:20270304:light"
     assert "block refused: date_out_of_range" in caplog.text
     assert "2027-03-05" not in caplog.text
+    assert "mañana mucho" not in caplog.text
 
 
 def test_a_plugin_that_raises_gets_the_keyboard_and_the_line_stays(make_bot, caplog):
@@ -534,6 +578,112 @@ def test_a_plugin_that_raises_gets_the_keyboard_and_the_line_stays(make_bot, cap
     assert [x["id"] for x in pending] == [msg["message_id"]]
     assert "ai turn failed: RuntimeError" in caplog.text
     assert "her words" not in caplog.text
+    assert "me duele" not in caplog.text
+
+
+def test_a_write_the_disk_refuses_says_nothing_was_saved(make_bot, monkeypatch):
+    bot = make_bot()
+    plugin(bot).REPLIES[:] = [record("Te lo apunto.", {"date": "2027-03-04", "flow": "heavy"})]
+
+    def refuse(fn):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(bot.repo, "write", refuse)
+    say(bot, "hoy mucho", reply_to=QUESTION)
+    texts = bot.tg.texts()
+    assert texts[0] == "Te lo apunto."
+    assert texts[1].startswith("No he sabido anotarlo bien")
+    assert buttons(bot.tg.of("sendMessage")[1]["reply_markup"])[0] == "f:20270304:light"
+
+
+def test_the_lines_are_removed_only_after_the_block_is_applied(make_bot, monkeypatch):
+    bot = make_bot()
+    mod = plugin(bot)
+    block = record("Te lo apunto.", {"date": "2027-03-04", "flow": "heavy"})
+    mod.REPLIES[:] = [block, block]
+    write = bot.repo.write
+
+    def crash(fn):
+        raise RuntimeError("crash mid-turn")
+
+    monkeypatch.setattr(bot.repo, "write", crash)
+    msg = say(bot, "hoy mucho", reply_to=QUESTION)
+    assert [x["id"] for x in bot.kv.get_json(f"pending:{GROUP}")] == [msg["message_id"]]
+    assert day(bot, date(2027, 3, 4)) is None
+    monkeypatch.setattr(bot.repo, "write", write)
+    say(bot, "¿lo tienes?", reply_to=QUESTION)
+    assert len(mod.CALLS[1]["turn"]["new"]) == 2  # her first line went again
+    assert day(bot, date(2027, 3, 4)).flow == "heavy"
+    assert bot.kv.get_json(f"pending:{GROUP}") is None
+
+
+def test_an_answer_telegram_refuses_gets_the_keyboard_and_keeps_the_lines(make_bot):
+    bot = make_bot()
+    plugin(bot).REPLIES[:] = [record("Te lo apunto.", {"date": "2027-03-04", "flow": "heavy"})]
+    bot.tg.fail_next("sendMessage", 400, "Bad Request: message is too long")
+    msg = say(bot, "hoy mucho", reply_to=QUESTION)
+    down = bot.tg.of("sendMessage")[-1]
+    assert down["text"].startswith("Ahora mismo no puedo leer mensajes escritos.")
+    assert buttons(down["reply_markup"])[0] == "f:20270304:light"
+    assert day(bot, date(2027, 3, 4)) is None
+    assert [x["id"] for x in bot.kv.get_json(f"pending:{GROUP}")] == [msg["message_id"]]
+
+
+def test_a_long_answer_is_split_and_only_its_last_part_asks(make_bot):
+    bot = make_bot()
+    long = "\n\n".join(["Una línea de ejemplo bastante larga. " * 20] * 8) + "\n\n¿Y tú?"
+    assert len(long) > TEXT_MAX
+    plugin(bot).REPLIES[:] = [long]
+    msg = say(bot, "cuéntame", reply_to=QUESTION)
+    sent = bot.tg.of("sendMessage")
+    assert len(sent) == 2
+    assert all(len(p["text"].encode("utf-16-le")) // 2 <= TEXT_MAX for p in sent)
+    assert "\n\n".join(p["text"] for p in sent) == long
+    assert sent[0]["reply_parameters"]["message_id"] == msg["message_id"]
+    assert "reply_parameters" not in sent[1] and "reply_markup" not in sent[0]
+    assert sent[1]["reply_markup"] == {"force_reply": True, "selective": True}
+
+
+def test_split_text_cuts_an_overlong_paragraph_in_utf16_units():
+    assert split_text("hola") == ["hola"]
+    parts = split_text("🩸" * 3000)  # 6000 UTF-16 units
+    assert [len(p) for p in parts] == [2048, 952]
+    assert "".join(parts) == "🩸" * 3000
+
+
+def test_after_a_timeout_the_plugin_is_not_called_again_until_it_returns(make_bot):
+    bot = make_bot(profile=PROFILE.replace("timeout_s: 5", "timeout_s: 0.2"))
+    mod = plugin(bot)
+    release, lock = threading.Event(), threading.Lock()
+    running = {"now": 0, "peak": 0}
+
+    def slow(turn):
+        with lock:
+            running["now"] += 1
+            running["peak"] = max(running["peak"], running["now"])
+        release.wait(5)
+        with lock:
+            running["now"] -= 1
+        return {"text": "tarde", "conversation": "c", "kept": True}
+
+    mod.REPLIES[:] = [slow, slow]
+    try:
+        say(bot, "uno", reply_to=QUESTION)
+        say(bot, "dos", reply_to=QUESTION)
+        assert len(mod.CALLS) == 1
+        assert running["peak"] == 1
+        assert [t for t in bot.tg.texts() if t.startswith("Ahora mismo")] and len(
+            bot.tg.texts()
+        ) == 2
+    finally:
+        release.set()
+    abandoned = assistant._ABANDONED[str((bot.data / "plugins" / "fake.py").resolve())]
+    abandoned.join(5)
+    mod.REPLIES[:] = []
+    say(bot, "tres", reply_to=QUESTION)
+    assert len(mod.CALLS[-1]["turn"]["new"]) == 3
+    assert bot.tg.texts()[-1] == "Vale."
+    assert "tarde" not in bot.tg.texts()
 
 
 def test_not_kept_writes_nothing_and_the_resend_gets_one_answer(make_bot):
@@ -654,6 +804,16 @@ def test_with_privacy_off_her_plain_text_is_answered_and_an_admins_is_not(make_b
     assert plugin(bot).CALLS == []
     say(bot, "me ha bajado hoy")
     assert plugin(bot).CALLS[0]["turn"]["new"][0]["content"] == "Lucía: me ha bajado hoy"
+
+
+def test_with_privacy_off_an_admins_reply_to_her_is_not_for_the_bot(make_bot):
+    bot = make_bot(read_all=True)
+    say(bot, "¿te traigo algo?", user=ADMIN, reply_to="me duele", reply_from=HER)
+    assert plugin(bot).CALLS == []
+    assert bot.kv.get_json(f"pending:{GROUP}") is None
+    assert bot.tg.texts() == []
+    say(bot, "¿te traigo algo?", user=ADMIN, reply_to=QUESTION)  # positive control
+    assert len(plugin(bot).CALLS) == 1
 
 
 def test_strangers_and_other_chats_get_no_answer(make_bot):

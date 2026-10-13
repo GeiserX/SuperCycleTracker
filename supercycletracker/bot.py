@@ -46,6 +46,7 @@ DEFAULT_SYMPTOMS = (
     "lower_back_pain",
 )
 PAIN_HIGH = 8  # a day crossing into this pain or more posts `pain_high`
+TEXT_MAX = 4096  # Telegram's limit on one message, in UTF-16 code units
 NOT_MODIFIED = "message is not modified"
 HER, ADMIN = "her", "admin"
 
@@ -537,7 +538,7 @@ class Bot:
             return
         today = self.today()
         if not records.in_range(d, today):
-            self.answer(cq["id"], t("toast_old"))
+            self.answer(cq["id"], t("toast_error" if d > today else "toast_old"))
             log.info("callback refused: date_out_of_range")
             return
         if chat is None or message.get("message_id") is None:
@@ -649,8 +650,11 @@ class Bot:
         self.edit(tap, f"{text}\n\n{question}", self.kb_period(nxt, log_, today))
 
     def _tap_fix(self, tap: Tap, d: date, value: None, today: date) -> None:
+        """«Corregir»: the flow step again, with a question that fits a day already answered."""
         self.answer(tap.id)
-        self.flow_step(tap, d, self.repo.load(), today)
+        log_ = self.repo.load()
+        text = self.t("ask_fix", m=self.mention(), date=self.t.date(d))
+        self.edit(tap, text, self.kb_period(d, log_, today))
 
     def _tap_more(self, tap: Tap, d: date, value: None, today: date) -> None:
         self.answer(tap.id)
@@ -731,7 +735,6 @@ class Bot:
                     we=t.date(p.window_end, "short"),
                 ),
             )
-            log.info("period closed")
         crossings = [
             after.pain
             for _, before, after in change.items
@@ -742,7 +745,6 @@ class Bot:
         ]
         if crossings:
             self.post(chat, t("pain_high", n=max(crossings)))
-            log.info("pain_high sent")
 
     def recorded_text(self, change: Change) -> str | None:
         """«Anotado:» with one line per date that changed, built from the `Change` and never
@@ -756,10 +758,12 @@ class Bot:
                 lines.append(t("line_deleted", date=when))
             elif done is not None and d == done.closing:
                 lines.append(t("line_closed", date=when))
+            elif before is not None and _same_facts(before, after):
+                continue  # only the source moved (her words resent by an admin)
+            elif self.summary(after) == (self.summary(before) if before else "-"):
+                lines.append(t("line_note", date=when))  # the summary leaves the note out
             elif before is None:
                 lines.append(t("line_new", date=when, summary=self.summary(after)))
-            elif _same_facts(before, after):
-                continue  # only the source moved (her words resent by an admin)
             else:
                 lines.append(
                     t(
@@ -935,34 +939,43 @@ class Bot:
             self.kv.set(f"conv:{chat}", reply.conversation)
         else:
             self.kv.delete(f"conv:{chat}")
-        taken = {x["id"] for x in lines}
-        self.kv.update_json(key, lambda cur: [x for x in cur or [] if x["id"] not in taken] or None)
         text, block = assistant.extract(reply.text)
-        if text:
-            self.say(chat, text, lines[-1]["id"])
+        if text and not self.say(chat, text, lines[-1]["id"]):
+            # she never saw the answer: a failed turn, so the buttons and the lines stay
+            self.post(chat, self.t("ai_down"), self.today_keyboard())
+            return
         if block is not None:
             source = "admin" if all(x.get("admin") for x in lines) else "telegram"
             self.apply_block(chat, block, source, today)
+        # last, so a crash before here sends the lines again; a block applied twice changes
+        # nothing the second time
+        taken = {x["id"] for x in lines}
+        self.kv.update_json(key, lambda cur: [x for x in cur or [] if x["id"] not in taken] or None)
 
-    def say(self, chat: int, text: str, reply_to: int | None) -> None:
-        """An assistant answer: plain text, a reply to her message. One that ends with a
-        question carries a selective force_reply, so her answer reaches the bot too."""
-        markup = None
-        if text.rstrip().endswith("?"):
-            markup = {"force_reply": True, "selective": True}
-        parameters = (
-            {"message_id": reply_to, "allow_sending_without_reply": True} if reply_to else None
-        )
-        try:
-            self.tg.call(
-                "sendMessage",
-                chat_id=chat,
-                text=text,
-                reply_parameters=parameters,
-                reply_markup=markup,
-            )
-        except TelegramError as e:
-            log.warning("send failed: %s", safe(e))
+    def say(self, chat: int, text: str, reply_to: int | None) -> bool:
+        """An assistant answer: plain text, a reply to her message, split at Telegram's limit.
+        One that ends with a question carries a selective force_reply on its last part, so her
+        answer reaches the bot too. False when a part could not be sent."""
+        parts = split_text(text)
+        for i, part in enumerate(parts):
+            markup = None
+            if i == len(parts) - 1 and text.rstrip().endswith("?"):
+                markup = {"force_reply": True, "selective": True}
+            parameters = None
+            if reply_to and i == 0:
+                parameters = {"message_id": reply_to, "allow_sending_without_reply": True}
+            try:
+                self.tg.call(
+                    "sendMessage",
+                    chat_id=chat,
+                    text=part,
+                    reply_parameters=parameters,
+                    reply_markup=markup,
+                )
+            except TelegramError as e:
+                log.warning("send failed: %s", safe(e))
+                return False
+        return True
 
     def apply_block(self, chat: int, block: object, source: str, today: date) -> None:
         """Validate and write a record block, all or nothing, then «Anotado:» from the
@@ -976,7 +989,7 @@ class Bot:
             log.warning("block refused: %s", e.code)
             self.post(chat, self.t("invalid_block"), self.today_keyboard())
             return
-        except ValueError as e:  # an unreadable log
+        except (ValueError, OSError) as e:  # an unreadable log, or the disk refused the write
             log.warning("block failed: %s", safe(e))
             self.post(chat, self.t("invalid_block"), self.today_keyboard())
             return
@@ -984,6 +997,33 @@ class Bot:
         if text:
             self.post(chat, text)
         self.announce(change, chat)
+
+
+def split_text(text: str, limit: int = TEXT_MAX) -> list[str]:
+    """`text` in parts of at most `limit` UTF-16 code units, cut between paragraphs where it
+    can and inside one only when a paragraph alone is too long."""
+    parts, current = [], ""
+    for para in text.split("\n\n"):
+        joined = f"{current}\n\n{para}" if current else para
+        if _units(joined) <= limit:
+            current = joined
+            continue
+        if current:
+            parts.append(current)
+        while _units(para) > limit:
+            cut = limit
+            while _units(para[:cut]) > limit:
+                cut -= 1
+            parts.append(para[:cut])
+            para = para[cut:]
+        current = para
+    if current:
+        parts.append(current)
+    return parts
+
+
+def _units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
 
 
 def _same_facts(a: Day, b: Day) -> bool:

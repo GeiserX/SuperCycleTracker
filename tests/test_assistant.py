@@ -1,5 +1,6 @@
 import os
 import shutil
+import sys
 import threading
 from datetime import date, datetime
 from pathlib import Path
@@ -51,6 +52,35 @@ def test_a_plugin_that_fails_to_import_says_so_without_its_text(data):
         assistant.load_module(data, "plugins/broken.py")
     assert info.value.code == "plugin_load_failed"
     assert "secret" not in str(info.value)
+    origins = [getattr(m, "__file__", "") or "" for m in list(sys.modules.values())]
+    assert not [o for o in origins if o.endswith("broken.py")]  # a failed import leaves nothing
+
+
+DATACLASS_PLUGIN = """\
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass
+class State:
+    calls: int = 0
+
+
+STATE = State()
+
+
+def converse(turn, settings):
+    STATE.calls += 1
+    return str(STATE.calls)
+"""
+
+
+def test_a_plugin_may_keep_its_state_in_a_dataclass(data):
+    (data / "plugins" / "state.py").write_text(DATACLASS_PLUGIN)
+    turn = assistant.turn(None, "r", "c", "", ["x"])
+    assert assistant.converse(data, "plugins/state.py", turn, {"timeout_s": 5}).text == "1"
+    assert assistant.converse(data, "plugins/state.py", turn, {"timeout_s": 5}).text == "2"
 
 
 def test_the_module_is_kept_per_mtime_and_reloaded_after_an_edit(data):
