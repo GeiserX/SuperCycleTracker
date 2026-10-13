@@ -135,3 +135,43 @@ def test_say_without_a_token_or_without_ask_refuses(data, monkeypatch):
 def test_run_refuses_without_a_token(data, monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     assert sct("run", "--data", data)[0] == 2
+
+
+def test_predict_defaults_to_the_bot_day_not_the_calendar_day(data, monkeypatch):
+    class Clock(cli.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cli.datetime(2025, 9, 10, 0, 0, tzinfo=tz)  # 02:00 in Madrid
+
+    monkeypatch.setattr(cli, "datetime", Clock)
+    code, out, _ = sct("predict", "--data", data)
+    assert code == 0
+    assert "today: 2025-09-09" in out
+
+
+def test_check_refuses_admins_that_are_not_a_mapping(data):
+    profile = data / "cycle" / "profile.yaml"
+    profile.write_text(
+        profile.read_text(encoding="utf-8").replace("{222: Marta}", "[222]"), encoding="utf-8"
+    )
+    code, _, err = sct("check", "--data", data)
+    assert code == 1
+    assert "profile: bad_profile" in err
+
+
+def test_import_refuses_without_a_profile(data):
+    (data / "cycle" / "profile.yaml").unlink()
+    code, out, err = sct("import-apple-health", FIXTURES / "export_fictional.xml", "--data", data)
+    assert (code, out) == (1, "")
+    assert err == "profile: missing_profile\n"
+
+
+def test_import_refuses_a_bad_timezone(data):
+    profile = data / "cycle" / "profile.yaml"
+    profile.write_text(
+        profile.read_text(encoding="utf-8").replace("Europe/Madrid", "Mars/Olympus"),
+        encoding="utf-8",
+    )
+    code, out, err = sct("import-apple-health", FIXTURES / "export_fictional.xml", "--data", data)
+    assert (code, out) == (1, "")
+    assert err == "profile: bad_timezone\n"

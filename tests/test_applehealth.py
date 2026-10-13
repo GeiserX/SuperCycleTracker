@@ -56,7 +56,7 @@ def test_a_zip_with_a_localised_member_is_merged(data, export_zip):
     flows = {d.isoformat(): x.flow for d, x in log.items()}
     assert flows == {
         "2028-01-10": "light",  # the current name form
-        "2028-01-11": "heavy",  # the older name form and the integer 4 on one day: the heaviest
+        "2028-01-11": "heavy",  # the older name form (heavy) beats the integer 3 on the same day
         "2028-01-12": "medium",  # the integer 3; replaces the earlier import's day
         "2028-01-13": "none",
         "2028-01-24": None,  # spotting only

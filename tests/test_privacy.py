@@ -2,8 +2,9 @@
 
 A full scripted flow runs with the log captured at DEBUG: a scheduled card walked with taps, replies
 the assistant answers with a record block, a block refused for a symptom that carries a planted
-word, a plugin that fails with her words in its exception, /anotar, /resumen, /estado, /deshacer
-and a git sync. None of her words, the assistant's words, the dates, the values or the names may
+word, a plugin that fails with her words in its exception, /anotar (and one it refuses, with a
+planted word), /resumen, /estado, /deshacer of a batch and of a pushed commit, /nuevo with a
+`forget` that fails with her words, and a git sync. None of her words, the assistant's words, the dates, the values or the names may
 appear in the log. The same flow with one planted `log.info(text)` must go red.
 """
 
@@ -137,6 +138,11 @@ def scripted_flow(bot):
     bot.repo.flush(force=True)
     command(bot, "/anotar anteayer mucho")
     bot.repo.flush(force=True)
+    command(bot, "/deshacer")  # HEAD is the pushed `log:` commit: the `undo:` commit path
+    command(bot, f"/anotar {PLANTED} {HER_WORDS[1]}")  # the parser refuses it
+    bot.kv.set(f"conv:{GROUP}", "conv-x")
+    mod.forget = lambda conversation, settings: (_ for _ in ()).throw(RuntimeError(HER_WORDS[0]))
+    command(bot, "/nuevo", user=ADMIN)
     bot.tg.fail_next("sendMessage", 400, "Bad Request: chat not found")
     help_update = {
         "update_id": 1,
@@ -186,6 +192,9 @@ def test_the_service_log_holds_no_words_dates_values_or_names(
     assert any(t.startswith("Ahora mismo no puedo") for t in texts)
     assert "block refused: unknown_symptom" in caplog.text
     assert "git push ok" in caplog.text
+    assert "undo committed" in caplog.text
+    assert "anotar refused" in caplog.text
+    assert "forget failed" in caplog.text
 
     found = [s for s in SECRETS if s.lower() in caplog.text.lower()]
     if planted:

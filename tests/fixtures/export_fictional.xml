@@ -25,10 +25,10 @@
  </Record>
  <Record type="HKCategoryTypeIdentifierAbdominalCramps" sourceName="Phone" startDate="2028-01-10 12:00:00 +0100" endDate="2028-01-10 12:00:00 +0100" value="HKCategoryValueSeverityModerate"/>
  <Record type="HKCategoryTypeIdentifierHeadache" sourceName="Phone" startDate="2028-01-10 12:00:00 +0100" endDate="2028-01-10 12:00:00 +0100" value="HKCategoryValueSeverityNotPresent"/>
- <Record type="HKCategoryTypeIdentifierMenstrualFlow" sourceName="Phone" startDate="2028-01-11 09:00:00 +0100" endDate="2028-01-11 09:00:00 +0100" value="HKCategoryValueMenstrualFlowMedium">
+ <Record type="HKCategoryTypeIdentifierMenstrualFlow" sourceName="Phone" startDate="2028-01-11 09:00:00 +0100" endDate="2028-01-11 09:00:00 +0100" value="HKCategoryValueMenstrualFlowHeavy">
   <MetadataEntry key="HKMenstrualCycleStart" value="0"/>
  </Record>
- <Record type="HKCategoryTypeIdentifierMenstrualFlow" sourceName="Watch" startDate="2028-01-11 20:00:00 +0100" endDate="2028-01-11 20:00:00 +0100" value="4"/>
+ <Record type="HKCategoryTypeIdentifierMenstrualFlow" sourceName="Watch" startDate="2028-01-11 20:00:00 +0100" endDate="2028-01-11 20:00:00 +0100" value="3"/>
  <Record type="HKCategoryTypeIdentifierBloating" sourceName="Phone" startDate="2028-01-11 12:00:00 +0100" endDate="2028-01-11 12:00:00 +0100" value="1"/>
  <Record type="HKCategoryTypeIdentifierFatigue" sourceName="Phone" startDate="2028-01-11 12:00:00 +0100" endDate="2028-01-11 12:00:00 +0100" value="3"/>
  <Record type="HKCategoryTypeIdentifierAppetiteChanges" sourceName="Phone" startDate="2028-01-11 12:00:00 +0100" endDate="2028-01-11 12:00:00 +0100" value="HKCategoryValueAppetiteChangesNoChange"/>

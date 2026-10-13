@@ -136,10 +136,16 @@ def cmd_predict(a) -> int:
 
 
 def cmd_import(a) -> int:
-    profile, _ = _profile(a.data)
-    tz = profile.timezone if profile is not None else "UTC"
+    """Dates follow the profile timezone, so the import refuses to guess one: without a
+    readable profile with a valid timezone a record near midnight would land on another day."""
+    profile, problems = _profile(a.data)
+    blocking = [c for c in problems if c in ("missing_profile", "bad_profile", "bad_timezone")]
+    if profile is None or blocking:
+        for code in blocking:
+            print(f"profile: {code}", file=sys.stderr)
+        return 1
     try:
-        report = applehealth.merge(a.export, a.data, tz, dry_run=a.dry_run)
+        report = applehealth.merge(a.export, a.data, profile.timezone, dry_run=a.dry_run)
     except applehealth.ImportFailed as e:
         print(f"import failed: {e}", file=sys.stderr)
         return 1
