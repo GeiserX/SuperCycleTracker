@@ -86,11 +86,11 @@ def test_median_and_window_on_the_fictional_log():
 
 
 def test_outlier_lengths_are_dropped():
-    log = history("2027-01-01", [30, 19, 46, 29, 31])
+    log = history("2027-01-01", [30, 19, 20, 46, 45, 29, 31])
     starts = records.starts(log)
-    assert [(b - a).days for a, b in itertools.pairwise(starts)] == [30, 19, 46, 29, 31]
+    assert [(b - a).days for a, b in itertools.pairwise(starts)] == [30, 19, 20, 46, 45, 29, 31]
     p = predict(log, d("2027-12-31"))
-    assert p.lengths == (30, 29, 31)
+    assert p.lengths == (30, 20, 45, 29, 31)  # 20 and 45 are kept, 19 and 46 dropped
     assert p.median == 30
 
 
@@ -103,11 +103,13 @@ def test_window_is_widened_to_two_days_each_side():
     )
 
 
-def test_even_count_median_rounds_half_up():
-    p = predict(history("2027-01-01", [29, 30, 25, 34]), d("2027-12-31"))
-    assert p.median == 30  # the middle two lengths are 29 and 30: half rounds up
-    assert p.window_start == p.last_start + timedelta(days=25)
-    assert p.window_end == p.last_start + timedelta(days=34)
+def test_even_count_median_rounds_half_to_even():
+    # the design's `round(median(recent))` is Python's round: x.5 goes to the even neighbour
+    p = predict(history("2027-01-01", [27, 30, 26, 33]), d("2027-12-31"))
+    assert p.median == 28  # the middle two are 27 and 30: 28.5, and half-up would give 29
+    assert p.expected == p.last_start + timedelta(days=28)
+    assert p.window_start == p.last_start + timedelta(days=26)
+    assert p.window_end == p.last_start + timedelta(days=33)
 
 
 def test_fewer_than_three_lengths_uses_28_and_three_days_each_side():
@@ -184,11 +186,18 @@ def test_missing_days_oldest_first_then_today():
 
 
 def test_missing_days_stop_at_the_closing_none():
+    # the gaps before the none are still missing, but a closed period is not asked about
     log = with_days({}, ("2027-05-01", "medium"), ("2027-05-04", "none"))
     ph = phase(log, d("2027-05-05"))
     assert ph.kind == "quiet"
     assert ph.missing == (d("2027-05-02"), d("2027-05-03"))
-    assert queue(ph, log, d("2027-05-05")) == (d("2027-05-02"), d("2027-05-03"))
+    assert queue(ph, log, d("2027-05-05")) == ()
+    # days after the none, inside the look-back, are not missing
+    log = with_days({}, ("2027-05-01", "medium"), ("2027-05-03", "none"))
+    ph = phase(log, d("2027-05-06"))
+    assert ph.kind == "quiet"
+    assert ph.missing == ()
+    assert queue(ph, log, d("2027-05-06")) == ()
 
 
 def test_a_start_back_dated_four_days_opens_day_five_with_the_gaps():

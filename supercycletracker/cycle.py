@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import itertools
-import math
 import statistics
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
@@ -55,10 +54,6 @@ class Phase:
     prediction: Prediction | None
 
 
-def _round(x: float) -> int:
-    return math.floor(x + 0.5)
-
-
 def _upto(log: Mapping[date, Day], today: date) -> dict[date, Day]:
     return {d: day for d, day in log.items() if d <= today}
 
@@ -74,7 +69,7 @@ def period_days(log: Mapping[date, Day]) -> int:
             runs.append(1)
         previous = d
     lengths = [r for r in runs if r >= MIN_RUN]
-    return _round(statistics.median(lengths)) if lengths else DEFAULT_PERIOD_DAYS
+    return round(statistics.median(lengths)) if lengths else DEFAULT_PERIOD_DAYS
 
 
 def predict(log: Mapping[date, Day], today: date) -> Prediction | None:
@@ -95,7 +90,7 @@ def predict(log: Mapping[date, Day], today: date) -> Prediction | None:
         expected = last + timedelta(days=median)
         window = (expected - timedelta(days=3), expected + timedelta(days=3))
     else:
-        median = _round(statistics.median(recent))
+        median = round(statistics.median(recent))  # Python's round: a half goes to the even
         expected = last + timedelta(days=median)
         window = (
             min(last + timedelta(days=min(recent)), expected - timedelta(days=2)),
@@ -152,10 +147,13 @@ def phase(log: Mapping[date, Day], today: date, skipped: Collection[date] = ()) 
 
 
 def queue(ph: Phase, log: Mapping[date, Day], today: date) -> tuple[date, ...]:
-    """The dates the check-in card still wants: missing days oldest first, then today while the
-    period is open and today has no flow. On day 8 (the catch-up day) only the missing days."""
+    """The dates the check-in card still wants: missing days oldest first, then today while
+    today has no flow. On day 8 (the catch-up day) only the missing days. Outside an open period
+    nothing: a closed period is not asked about, even for gaps before its closing `none`."""
+    if ph.kind != "period":
+        return ()
     dates = list(ph.missing)
-    if ph.kind == "period" and ph.day is not None and ph.day <= PERIOD_MAX_DAY:
+    if ph.day is not None and ph.day <= PERIOD_MAX_DAY:
         day = log.get(today)
         if day is None or day.flow is None:
             dates.append(today)
