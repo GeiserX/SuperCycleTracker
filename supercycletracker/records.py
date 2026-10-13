@@ -116,6 +116,11 @@ def load(path: str | Path) -> Log:
         text = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
         return {}
+    return loads(text)
+
+
+def loads(text: str) -> Log:
+    """Parse the log's text, with the same checks as `load`."""
     log: Log = {}
     for line in text.splitlines():
         if line.strip():
