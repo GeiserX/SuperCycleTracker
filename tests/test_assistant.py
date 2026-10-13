@@ -150,6 +150,14 @@ def test_the_plugins_own_exception_goes_up_as_it_is(data):
         assistant.converse(data, "plugins/fake.py", assistant.turn(None, "r", "c", "", []), {})
 
 
+@pytest.mark.parametrize("exit_", [SystemExit(1), KeyboardInterrupt()])
+def test_a_plugin_that_exits_is_a_reason_code_not_an_exit(data, exit_):
+    mod = assistant.load_module(data, "plugins/fake.py")
+    mod.REPLIES[:] = [exit_]
+    with pytest.raises(PluginError, match="plugin_aborted"):
+        assistant.converse(data, "plugins/fake.py", assistant.turn(None, "r", "c", "", []), {})
+
+
 def test_forget_is_optional(data):
     mod = assistant.load_module(data, "plugins/fake.py")
     assistant.forget(data, "plugins/fake.py", "c-9", {})

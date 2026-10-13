@@ -150,7 +150,8 @@ def converse(data: str | Path, rel: str | None, turn: dict, plugin_settings: dic
     The call runs in its own daemon thread because the app cannot stop a plugin: one that
     outlives the wait is abandoned and the turn counts as failed (`PluginError("timeout")`).
     Until that call returns, the plugin is not called again (`PluginError("plugin_busy")`), so
-    it never runs two turns at once. The plugin's own exception is raised as it is."""
+    it never runs two turns at once. The plugin's own exception is raised as it is; an exit that
+    is not an `Exception` (`SystemExit`, `KeyboardInterrupt`) becomes `PluginError("plugin_aborted")`."""
     fn = function(data, rel, "converse")
     key = str((Path(data) / str(rel)).resolve())
     previous = _ABANDONED.get(key)
@@ -171,8 +172,11 @@ def converse(data: str | Path, rel: str | None, turn: dict, plugin_settings: dic
         _ABANDONED[key] = thread
         raise PluginError("timeout")
     _ABANDONED.pop(key, None)
-    if "error" in box:
-        raise box["error"]
+    error = box.get("error")
+    if error is not None:
+        if not isinstance(error, Exception):  # SystemExit and the like must not end the worker
+            raise PluginError("plugin_aborted")
+        raise error
     return reply(box.get("out"))
 
 
