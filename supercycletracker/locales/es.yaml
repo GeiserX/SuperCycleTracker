@@ -45,6 +45,10 @@ toast_old: "Esa tarjeta es demasiado antigua, así que no he guardado nada."
 toast_error: "Algo ha fallado, así que no he guardado nada."
 undo_done: "Deshecho: {what}."
 undo_none: "No hay nada que deshacer."
+invalid_settings: "No he podido aplicar ese cambio, así que lo dejo todo como estaba. La hora va de 05:00 a 23:59 (por ejemplo, /hora 21:30) y el último día que pregunto, del 3 al 14."
+settings_done: "Ajustado: {what}."
+settings_ask_at: "te pregunto a las {time}"
+settings_period_max_day: "pregunto cada día hasta el día {n} de la regla"
 
 # --- /resumen ------------------------------------------------------------------------------
 summary_title: "Tu ciclo, {name}:"
@@ -57,7 +61,7 @@ summary_eve: "• Antes de la regla sueles notar: {items}."
 summary_empty: "Aún no tengo datos suficientes."
 
 # --- /estado -------------------------------------------------------------------------------
-status: "Fase: {phase}. Hoy: {asked}. Asistente: {ai}. Datos: {git}."
+status: "Fase: {phase}. Hoy: {asked}. Hora de la pregunta: {ask_at}. Asistente: {ai}. Datos: {git}."
 phase_no_history: "sin historial"
 phase_quiet: "tranquila hasta el {ws}"
 phase_waiting: "esperando (del {ws} al {we})"
@@ -83,6 +87,7 @@ menu:
   hoy: "La pregunta de hoy, o cuéntame algo"
   resumen: "Tu ciclo en pocas líneas"
   anotar: "Anotar un día sin el asistente"
+  hora: "Cambiar la hora a la que pregunto"
   deshacer: "Deshacer lo último que anoté"
   ayuda: "Lo que entiendo"
 help: |-
@@ -90,6 +95,7 @@ help: |-
   /hoy: la pregunta de hoy; con texto detrás, me lo cuentas
   /resumen: tu ciclo en pocas líneas
   /anotar ayer mucho 6 calambres: anotar un día sin el asistente
+  /hora 21:30: cambiar la hora a la que pregunto
   /deshacer: deshacer lo último que anoté
   /ayuda: esta lista
   También puedes responder a cualquiera de mis mensajes.

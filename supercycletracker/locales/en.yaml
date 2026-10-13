@@ -47,6 +47,10 @@ toast_old: "That card is too old, so I saved nothing."
 toast_error: "Something went wrong, so I saved nothing."
 undo_done: "Undone: {what}."
 undo_none: "Nothing to undo."
+invalid_settings: "I could not apply that change, so I left everything as it was. The hour goes from 05:00 to 23:59 (for example, /hora 21:30) and the last day I ask, from 3 to 14."
+settings_done: "Changed: {what}."
+settings_ask_at: "I ask you at {time}"
+settings_period_max_day: "I ask every day up to day {n} of the period"
 
 # --- /resumen ------------------------------------------------------------------------------
 summary_title: "Your cycle, {name}:"
@@ -59,7 +63,7 @@ summary_eve: "• Before your period you usually notice: {items}."
 summary_empty: "I do not have enough data yet."
 
 # --- /estado: one key per Phase.kind and per state ----------------------------------------
-status: "Phase: {phase}. Today: {asked}. Assistant: {ai}. Data: {git}."
+status: "Phase: {phase}. Today: {asked}. Ask time: {ask_at}. Assistant: {ai}. Data: {git}."
 phase_no_history: "no history"
 phase_quiet: "quiet until {ws}"
 phase_waiting: "waiting ({ws} to {we})"
@@ -85,6 +89,7 @@ menu:
   hoy: "Today's question, or tell me something"
   resumen: "Your cycle in a few lines"
   anotar: "Note a day without the assistant"
+  hora: "Change the time I ask"
   deshacer: "Undo the last thing I noted"
   ayuda: "What I understand"
 help: |-
@@ -92,6 +97,7 @@ help: |-
   /hoy: today's question; with text after it, you tell me
   /resumen: your cycle in a few lines
   /anotar yesterday heavy 6 cramps: note a day without the assistant
+  /hora 21:30: change the time I ask
   /deshacer: undo the last thing I noted
   /ayuda: this list
   You can also reply to any of my messages.

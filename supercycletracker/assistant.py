@@ -2,8 +2,8 @@
 
 The plugin is one Python file in the data directory (`profile.yaml` `assistant.plugin`). The app
 never knows which provider sits behind it: it hands over the rules, a fresh `context.md`, the whole
-log and her new lines, and takes back text that may end with one fenced `record` block. The app,
-not the assistant, validates and applies that block. A plugin may also turn a voice note into text
+log and her new lines, and takes back text that may end with one fenced `record` block (and one
+`settings` block). The app, not the assistant, validates and applies those blocks. A plugin may also turn a voice note into text
 (`transcribe`) and hand back slow work to finish after its answer is posted (`later`).
 
 Nothing here logs: errors are `PluginError` reason codes, and a plugin's own exception goes up to
@@ -39,8 +39,9 @@ NOT_SETTINGS = ("plugin", "instructions")  # the profile keys a plugin's setting
 LANGUAGE_NAMES = {"en": "English", "es": "Spanish"}
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
-_BLOCK = re.compile(r"```record[^\S\n]*\n(.*?)```", re.DOTALL)
-_UNCLOSED = re.compile(r"```record\b.*\Z", re.DOTALL)
+BLOCK_KINDS = ("record", "settings")  # the fenced blocks an answer may end with
+_BLOCK = {k: re.compile(rf"```{k}[^\S\n]*\n(.*?)```", re.DOTALL) for k in BLOCK_KINDS}
+_UNCLOSED = {k: re.compile(rf"```{k}\b.*\Z", re.DOTALL) for k in BLOCK_KINDS}
 BAD_BLOCK = object()  # `extract` found a block whose JSON does not parse
 
 
@@ -247,14 +248,15 @@ def rules(name: str, language: str, others: Sequence[str] = (), instructions: st
     return text.rstrip() + "\n"
 
 
-def extract(text: str) -> tuple[str, object]:
-    """Take the record blocks out of an answer: `(clean text, the last block)`.
+def extract(text: str, kind: str = "record") -> tuple[str, object]:
+    """Take the `kind` blocks (`record` or `settings`) out of an answer: `(clean text, the last
+    block)`.
 
     The block is the parsed JSON, `BAD_BLOCK` when it does not parse (or the fence never
     closes), or None without a block. Every block leaves the text, so she never sees one."""
-    blocks = _BLOCK.findall(text)
-    clean = _BLOCK.sub("", text)
-    unclosed = _UNCLOSED.search(clean)
+    blocks = _BLOCK[kind].findall(text)
+    clean = _BLOCK[kind].sub("", text)
+    unclosed = _UNCLOSED[kind].search(clean)
     block: object = None
     if unclosed:
         clean = clean[: unclosed.start()]

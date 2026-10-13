@@ -11,7 +11,7 @@ from conftest import git
 
 from supercycletracker import records
 from supercycletracker.records import Edit
-from supercycletracker.repo import BOT_EMAIL, DATA_LOCK, KV, LOG_FILE, Repo, git_env
+from supercycletracker.repo import BOT_EMAIL, DATA_LOCK, KV, LOG_FILE, GitError, Repo, git_env
 
 DAY = date(2027, 3, 4)
 TOKEN = "tok-0123456789-not-a-real-one"
@@ -330,6 +330,63 @@ def test_pulls_once_an_hour_when_clean(data_repo):
     clock.advance(3000)
     assert repo.flush() == "pulled"
     assert "language: en" in profile.read_text()
+
+
+def test_a_pull_that_changes_the_profile_raises_the_reload_flag(data_repo):
+    dr, clock = data_repo, Clock()
+    repo = Repo(dr.data, clock=clock)
+    human_edit(dr, lambda log: {**log, DAY: records.Day(DAY, "admin", flow="light")})
+    assert repo.flush() == "pulled"
+    assert repo.profile_pulled is False  # the log changed, the profile did not
+    human_profile(dr, "name: Example\nlanguage: en\n")
+    clock.advance(3600)
+    assert repo.flush() == "pulled"
+    assert repo.profile_pulled is True
+
+
+def test_write_profile_commits_the_profile_alone_and_flush_pushes_it(data_repo):
+    dr, clock = data_repo, Clock()
+    repo, n0 = Repo(dr.data, clock=clock), dr.remote_count()
+    tap(repo, flow="heavy")  # a check-in still in its quiet minute
+    new = repo.write_profile(lambda old: old + 'ask_at: "21:30"\n', "ask_at 21:30")
+    assert new == 'name: Example\nlanguage: es\nask_at: "21:30"\n'
+    assert subject(dr.data) == "settings: ask_at 21:30"
+    assert git(dr.data, "show", "--name-only", "--format=", "HEAD").split() == [
+        "cycle/profile.yaml"
+    ]
+    assert git(dr.data, "status", "--porcelain").strip() == "M cycle/log.jsonl"
+    clock.advance(61)
+    assert repo.flush() == "pushed"
+    assert dr.remote_count() == n0 + 2
+    assert dr.remote_file("cycle/profile.yaml") == new
+    # an unchanged text commits nothing
+    assert repo.write_profile(lambda old: old, "ask_at 21:30") == new
+    assert dr.remote_count() == n0 + 2 and repo.unpushed() == 0
+
+
+def test_write_profile_refused_or_not_committed_leaves_the_file_as_it_was(data_repo):
+    dr = data_repo
+    repo = Repo(dr.data)
+    profile = dr.data / "cycle" / "profile.yaml"
+    before, head = profile.read_bytes(), subject(dr.data)
+
+    def refuse(old):
+        raise ValueError("profile_not_editable")
+
+    with pytest.raises(ValueError):
+        repo.write_profile(refuse, "ask_at 21:30")
+    assert profile.read_bytes() == before
+    hook = dr.data / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    with pytest.raises(GitError):
+        repo.write_profile(lambda old: old + "period_max_day: 5\n", "period_max_day 5")
+    assert profile.read_bytes() == before
+    assert git(dr.data, "status", "--porcelain").strip() == ""
+    assert subject(dr.data) == head
+    hook.unlink()  # positive control: the same write commits once the hook is gone
+    repo.write_profile(lambda old: old + "period_max_day: 5\n", "period_max_day 5")
+    assert subject(dr.data) == "settings: period_max_day 5"
 
 
 def test_a_refused_push_keeps_the_commit_and_the_next_flush_pushes_it(data_repo):

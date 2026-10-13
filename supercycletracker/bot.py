@@ -74,7 +74,8 @@ POLL_S = 20  # getUpdates long poll
 WAIT_409_S = 30  # another poller holds the token: wait and keep the offset
 TICK_S = 60  # a long wait ticks at least this often: the healthcheck allows 180 s
 BACKOFF_MIN_S, BACKOFF_MAX_S = 5, 300  # 5xx and network failures
-MENU = ("hoy", "resumen", "anotar", "deshacer", "ayuda")  # the commands she sees in the menu
+MENU = ("hoy", "resumen", "anotar", "hora", "deshacer", "ayuda")  # the commands in the menu
+SETTINGS_KEYS = ("ask_at", "period_max_day")  # what a `settings` block or /hora may change
 
 _COMMAND = re.compile(r"^/([A-Za-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s+(.*))?$", re.DOTALL)
 _CALLBACK_DATE = re.compile(r"^\d{8}$")
@@ -153,6 +154,52 @@ def ask_time(value: str) -> clock_time:
     if at < ASK_EARLIEST:
         raise ValueError("bad_ask_at")
     return at
+
+
+def validate_settings(block: object) -> dict:
+    """A `settings` block (or /hora) checked all or nothing: `{"ask_at": "HH:MM",
+    "period_max_day": 3..14}`, at least one key and no other. Returns the values in
+    `SETTINGS_KEYS` order, `ask_at` written as HH:MM. Raises `ValueError` with a reason code,
+    never the value."""
+    if not isinstance(block, Mapping) or not block:
+        raise ValueError("bad_settings")
+    if any(key not in SETTINGS_KEYS for key in block):
+        raise ValueError("unknown_key")
+    out: dict = {}
+    if "ask_at" in block:
+        value = block["ask_at"]
+        if not isinstance(value, str):
+            raise ValueError("bad_ask_at")
+        out["ask_at"] = ask_time(value).strftime("%H:%M")
+    if "period_max_day" in block:
+        value = block["period_max_day"]
+        if isinstance(value, bool) or not isinstance(value, int) or value not in PERIOD_MAX_DAYS:
+            raise ValueError("bad_period_max_day")
+        out["period_max_day"] = value
+    return out
+
+
+def set_profile_lines(text: str, values: Mapping) -> str:
+    """`profile.yaml` with each top-level `key:` line's value replaced, by line: every comment
+    and every other line stays byte-identical, and a key that is not there is appended as a
+    top-level line. `ask_at` is written quoted, since YAML 1.1 reads 21:30 as a number."""
+    lines = text.splitlines(keepends=True)
+    for key, value in values.items():
+        rendered = f'"{value}"' if isinstance(value, str) else str(value)
+        line_re = re.compile(rf"{re.escape(key)}:(?P<sp>[ \t]*)(?:[^#\r\n]*?)(?P<rest>[ \t]+#.*)?")
+        found = False
+        for i, line in enumerate(lines):
+            body = line.rstrip("\r\n")
+            m = line_re.fullmatch(body)
+            if m is None:
+                continue
+            found = True
+            lines[i] = f"{key}:{m['sp'] or ' '}{rendered}{m['rest'] or ''}{line[len(body) :]}"
+        if not found:
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
+            lines.append(f"{key}: {rendered}\n")
+    return "".join(lines)
 
 
 def profile_errors(p: Profile, data: str | Path) -> list[str]:
@@ -363,6 +410,7 @@ class Bot:
             (("resumen", "summary"), self.cmd_resumen, both),
             (("anotar", "log"), self.cmd_anotar, both),
             (("deshacer", "undo"), self.cmd_deshacer, both),
+            (("hora", "time"), self.cmd_hora, both),
             (("estado", "status"), self.cmd_estado, admins),
             (("nuevo", "new"), self.cmd_nuevo, admins),
             (("presentacion", "about"), self.cmd_presentacion, admins),
@@ -1193,6 +1241,11 @@ class Bot:
         what = ", ".join(self.t.date(d) for d in change.dates)
         self.send(chat, self.t("undo_done", what=what))
 
+    def cmd_hora(self, msg: Mapping, rest: str, role: str) -> None:
+        """/hora HH:MM: the hour of the daily ask, with the same check as a `settings` block.
+        No AI."""
+        self.apply_settings(msg["chat"]["id"], {"ask_at": rest})
+
     def cmd_estado(self, msg: Mapping, rest: str, role: str) -> None:
         """/estado (admins): the phase, today's ask, the assistant and the git sync state."""
         self.send(msg["chat"]["id"], self.status_text(self.today()))
@@ -1227,7 +1280,7 @@ class Bot:
             git = t("status_git_unknown")
         else:
             git = t("status_git_ok")
-        return t("status", phase=phase, asked=asked, ai=ai, git=git)
+        return t("status", phase=phase, asked=asked, ask_at=self.profile.ask_at, ai=ai, git=git)
 
     def cmd_nuevo(self, msg: Mapping, rest: str, role: str) -> None:
         """/nuevo (admins): drop the pending lines and the assistant conversation, always, so
@@ -1318,6 +1371,9 @@ class Bot:
             self.repo.flush()
         except Exception as e:  # noqa: BLE001
             log.warning("git sync failed: %s", safe(e))
+        if self.repo.profile_pulled:
+            self.repo.profile_pulled = False
+            self.reload_profile()
         self.heartbeat()
 
     def heartbeat(self) -> None:
@@ -1475,6 +1531,7 @@ class Bot:
             else:
                 self.kv.delete(f"conv:{chat}")
         text, block = assistant.extract(reply.text)
+        text, settings = assistant.extract(text, "settings")
         if text and not self.say(chat, text, lines[-1]["id"]):
             # she never saw the answer: a failed turn, so the buttons and the lines stay
             self.post(chat, self.t("ai_down"), self.today_keyboard())
@@ -1482,6 +1539,8 @@ class Bot:
         if block is not None:
             source = "admin" if all(x.get("admin") for x in lines) else "telegram"
             self.apply_block(chat, block, source, today)
+        if settings is not None:
+            self.apply_settings(chat, settings)
         # last, so a crash before here sends the lines again; a block applied twice changes
         # nothing the second time
         taken = {x["id"] for x in lines}
@@ -1621,6 +1680,65 @@ class Bot:
         if text:
             self.post(chat, text)
         self.announce(change, chat)
+
+    # --- settings ------------------------------------------------------------------------
+
+    def apply_settings(self, chat: int, block: object) -> bool:
+        """A `settings` block or /hora: check it all or nothing, rewrite `profile.yaml` by line,
+        commit it (`settings: ask_at 21:30`), push, and use the new profile at once (the
+        scheduler reads `ask_at` on its next tick). «invalid_settings» when the block is
+        refused, «toast_error» when the file could not be written or committed."""
+        try:
+            if block is assistant.BAD_BLOCK:
+                raise ValueError("bad_json")
+            values = validate_settings(block)
+        except ValueError as e:
+            log.warning("settings refused: %s", e)
+            self.post(chat, self.t("invalid_settings"))
+            return False
+        profile: list[Profile] = []
+
+        def rewrite(old: str) -> str:
+            new = set_profile_lines(old, values)
+            p = Profile.from_dict(yaml.safe_load(new))
+            if profile_errors(p, self.data) or any(getattr(p, k) != v for k, v in values.items()):
+                raise ValueError("profile_not_editable")
+            profile.append(p)
+            return new
+
+        message = ", ".join(f"{k} {v}" for k, v in values.items())
+        try:
+            self.repo.write_profile(rewrite, message)
+        except (ValueError, yaml.YAMLError, GitError, OSError) as e:
+            log.warning("settings failed: %s", safe(e))
+            self.post(chat, self.t("toast_error"))
+            return False
+        self.profile = profile[0]
+        log.info("settings applied keys=%d", len(values))
+        try:
+            self.repo.flush()
+        except Exception as e:  # noqa: BLE001 - the next tick pushes it
+            log.warning("git sync failed: %s", safe(e))
+        what = "; ".join(self.t(f"settings_{k}", time=v, n=v) for k, v in values.items())
+        self.post(chat, self.t("settings_done", what=what))
+        return True
+
+    def reload_profile(self) -> bool:
+        """After a pull changed `profile.yaml`: use the new one, unless it fails the same
+        checks `sct check` makes; then the old one stays and the log says so."""
+        try:
+            p = load_profile(self.data)
+            errors = profile_errors(p, self.data)
+        except (OSError, ValueError, TypeError, yaml.YAMLError):
+            errors = ["bad_profile"]
+        if errors:
+            log.warning("profile reload refused: %s", ", ".join(errors))
+            return False
+        if p.language != self.profile.language:
+            self.t = Translator(p.language)
+        self.profile = p
+        log.info("profile reloaded")
+        return True
 
 
 def split_text(text: str, limit: int = TEXT_MAX) -> list[str]:
