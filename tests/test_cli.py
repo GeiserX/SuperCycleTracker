@@ -85,6 +85,17 @@ def test_check_accepts_the_edges_of_the_bot_day(data):
         assert sct("check", "--data", data)[0] == 0
 
 
+@pytest.mark.parametrize(
+    ("value", "ok"),
+    [("3", True), ("14", True), ("2", False), ("15", False), ("seven", False), ("true", False)],
+)
+def test_check_holds_period_max_day_to_3_through_14(data, value, ok):
+    profile = data / "cycle" / "profile.yaml"
+    profile.write_text(profile.read_text() + f"period_max_day: {value}\n", encoding="utf-8")
+    code, _, err = sct("check", "--data", data)
+    assert (code, err) == ((0, "") if ok else (1, "profile: bad_period_max_day\n"))
+
+
 def test_check_refuses_a_plugin_outside_the_data_dir(data):
     profile = data / "cycle" / "profile.yaml"
     profile.write_text(profile.read_text() + "assistant:\n  plugin: ../x.py\n", encoding="utf-8")
@@ -123,6 +134,29 @@ def test_say_ask_sends_a_test_card_and_leaves_last_ask_alone(data, monkeypatch):
     kv = KV(data / "state" / "sct.sqlite")
     assert kv.get("last_ask") is None
     kv.close()
+
+
+def test_say_intro_posts_the_introduction_to_the_group(data, monkeypatch):
+    sent = []
+
+    def fake(token):
+        tg = FakeTelegram()
+        sent.append(tg)
+        return tg
+
+    monkeypatch.setattr(telegram, "Telegram", fake)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "1:x")
+    code, out, err = sct("say", "--data", data, "--intro")
+    assert (code, out, err) == (0, "intro sent\n", "")
+    (intro,) = sent[0].of("sendMessage")
+    assert intro["chat_id"] == -100123
+    assert intro["text"].startswith(
+        "Hola. Soy el bot que lleva la cuenta del ciclo de Lucía en este grupo.\n"
+    )
+    assert intro["text"].endswith("/ayuda tiene la lista de lo que entiendo.")
+    assert "reply_markup" not in intro
+    with pytest.raises(SystemExit):  # one or the other
+        sct("say", "--data", data, "--intro", "--ask")
 
 
 def test_say_without_a_token_or_without_ask_refuses(data, monkeypatch):

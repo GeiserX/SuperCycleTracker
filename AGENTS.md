@@ -8,7 +8,7 @@ SuperCycleTracker is a menstrual cycle tracker that runs as a Telegram bot in a 
 uv run pytest -q                 # all tests, no network
 uv run ruff check .
 uv run ruff format .
-uv run sct check --data <dir>    # also: sct predict, sct import-apple-health, sct say --ask, sct run
+uv run sct check --data <dir>    # also: sct predict, sct import-apple-health, sct say --ask|--intro, sct run
 ```
 
 Run the test suite once per change. It drives real git repositories in temp dirs, so it is slow on a loaded machine; never run it in a loop or in parallel copies.

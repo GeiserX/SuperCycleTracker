@@ -28,6 +28,7 @@ log = logging.getLogger("sct.repo")
 
 DATA_LOCK = threading.RLock()
 LOG_FILE = "cycle/log.jsonl"
+PROFILE_FILE = "cycle/profile.yaml"
 STATE_DB = "state/sct.sqlite"
 
 QUIET_S = 60  # commit once the newest write is this old: a three-tap check-in is one commit
@@ -39,6 +40,7 @@ BOT_NAME = "SuperCycleTracker"
 BOT_EMAIL = "supercycletracker@localhost"
 LOG_PREFIX = "log: "
 UNDO_PREFIX = "undo: "
+SETTINGS_PREFIX = "settings: "  # a change she asked for from the chat; never undone by /deshacer
 DERIVE_PREFIX = "derive: "  # flags moved by a pull; not a check-in, so never undone
 
 
@@ -165,6 +167,14 @@ def _changed(old: Log, new: Log) -> list[date]:
     )
 
 
+def _replace_text(path: Path, text: str) -> None:
+    """Write `text` to `path` through a temp file and `os.replace`, keeping its mode."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, path.stat().st_mode & 0o777)
+    os.replace(tmp, path)
+
+
 def _dates_text(dates: list[date]) -> str:
     return ", ".join(d.isoformat() for d in dates) or "sync"
 
@@ -175,6 +185,8 @@ class Repo:
     ):
         self.data = Path(data)
         self.log_path = self.data / LOG_FILE
+        self.profile_path = self.data / PROFILE_FILE
+        self.profile_pulled = False  # a pull changed profile.yaml: the bot reloads it, then clears
         self.token = token
         self.clock = clock
         self.remote_ok: bool | None = None  # the startup `push --dry-run`, kept for /estado
@@ -232,9 +244,9 @@ class Repo:
     def _dirty(self) -> bool:
         return bool(self._run("status", "--porcelain", "--", LOG_FILE, code="status_failed"))
 
-    def _commit(self, message: str) -> None:
-        """Commit the log and only the log, whatever else a person left staged."""
-        self._run("commit", "--quiet", "-m", message, "--", LOG_FILE, code="commit_failed")
+    def _commit(self, message: str, path: str = LOG_FILE) -> None:
+        """Commit the log (or `path`) and only that, whatever else a person left staged."""
+        self._run("commit", "--quiet", "-m", message, "--", path, code="commit_failed")
 
     def _abort_rebase(self) -> None:
         try:
@@ -242,9 +254,9 @@ class Repo:
         except (subprocess.TimeoutExpired, OSError):
             pass
 
-    def _read(self) -> bytes | None:
+    def _read(self, path: Path | None = None) -> bytes | None:
         try:
-            return self.log_path.read_bytes()
+            return (path or self.log_path).read_bytes()
         except FileNotFoundError:
             return None
 
@@ -327,7 +339,7 @@ class Repo:
         A failure aborts the rebase and keeps the bot's commit. A conflict `-X theirs` cannot
         settle (a person deleted the log while the bot had a commit to push) fails as
         `pull_conflict` on every try until a person restores the file on the remote."""
-        before = self._read()
+        before, profile = self._read(), self._read(self.profile_path)
         try:
             r = self._git("pull", "--rebase", "-X", "theirs", "--autostash", "--quiet")
         except subprocess.TimeoutExpired:
@@ -342,6 +354,8 @@ class Repo:
             raise GitError("pull_conflict" if conflict else "pull_failed")
         if self._read() != before:
             self._rederive()
+        if self._read(self.profile_path) != profile:
+            self.profile_pulled = True
         log.info("git pull ok")
 
     def _rederive(self) -> None:
@@ -360,6 +374,28 @@ class Repo:
             records.save(self.log_path, derived)
             self._commit(DERIVE_PREFIX + _dates_text(_changed(current, derived)))
             log.info("starts re-derived after pull")
+
+    # --- the profile ---------------------------------------------------------------------
+
+    def write_profile(self, fn: Callable[[str], str], message: str) -> str:
+        """Rewrite `profile.yaml` with `fn` (old text to new text, raising `ValueError` to
+        refuse) and commit it alone as `settings: <message>`; the next `flush` pushes it.
+        Returns the new text. A commit that fails puts the old text back and raises."""
+        with DATA_LOCK:
+            old = self.profile_path.read_text(encoding="utf-8")
+            new = fn(old)
+            if new == old:
+                return old
+            _replace_text(self.profile_path, new)
+            try:
+                self._run("add", "--", PROFILE_FILE, code="add_failed")
+                self._commit(SETTINGS_PREFIX + message, PROFILE_FILE)
+            except (GitError, subprocess.TimeoutExpired, OSError):
+                _replace_text(self.profile_path, old)
+                self._git("reset", "--quiet", "--", PROFILE_FILE)
+                raise
+            log.info("git commit ok: settings")
+            return new
 
     # --- undo ----------------------------------------------------------------------------
 

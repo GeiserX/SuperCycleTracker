@@ -6,7 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
-from conftest import Clock, FakeTelegram
+from conftest import Clock, FakeTelegram, git, seed_log
 
 from supercycletracker import assistant, cycle, records
 from supercycletracker.bot import (
@@ -15,7 +15,9 @@ from supercycletracker.bot import (
     Interrupted,
     parse_anotar,
     parse_callback,
+    set_profile_lines,
     split_text,
+    validate_settings,
 )
 from supercycletracker.i18n import Translator
 from supercycletracker.records import Day
@@ -164,7 +166,12 @@ def test_callback_data_is_parsed_strictly_and_fits_64_bytes():
     ):
         with pytest.raises(ValueError):
             parse_callback(bad)
+    assert parse_callback("e:20270303:fatigue") == ("e", date(2027, 3, 3), "fatigue")
+    assert parse_callback("ed:20270303") == ("ed", date(2027, 3, 3), None)
+    with pytest.raises(ValueError):
+        parse_callback("e:20270303:fever")
     assert len(b"s:20270304:appetite_changes") <= 64
+    assert len(b"e:20270304:appetite_changes") <= 64
 
 
 def test_three_taps_walk_one_message_and_record_the_day(make_bot):
@@ -181,6 +188,7 @@ def test_three_taps_walk_one_message_and_record_the_day(make_bot):
     tap(bot, "p:20270329:4", message_id=mid)
     tap(bot, "s:20270329:abdominal_cramps", message_id=mid)
     tap(bot, "d:20270329", message_id=mid)
+    tap(bot, "ed:20270328", message_id=mid)  # the day before: «Nada especial»
     assert len(bot.tg.of("sendMessage")) == 1  # the card only: every step edited it
     steps = edits(bot)
     assert {e["message_id"] for e in steps} == {mid}
@@ -309,11 +317,79 @@ def test_the_picker_starts_an_earlier_day_and_then_asks_the_gaps(make_bot):
     tap(bot, "f:20270325:medium", message_id=mid)
     tap(bot, "p:20270325:2", message_id=mid)
     tap(bot, "d:20270325", message_id=mid)
+    assert buttons(edits(bot)[-1]["reply_markup"])[-1] == "ed:20270324"  # the day before
+    tap(bot, "ed:20270324", message_id=mid)
     nxt = edits(bot)[-1]
     assert nxt["text"] == "Anotado el jueves 25 de marzo. Ahora, ¿cómo fue el viernes 26 de marzo?"
     assert buttons(nxt["reply_markup"])[0] == "f:20270326:light"
     tap(bot, "back:20270329", message_id=mid)  # «Volver» goes back to the waiting card
     assert buttons(edits(bot)[-1]["reply_markup"])[0] == "y:20270329:light"
+
+
+def test_a_start_from_the_card_asks_about_the_day_before(make_bot):
+    bot = make_bot(today=date(2027, 3, 29))
+    mid = card(bot)
+    tap(bot, "y:20270329:heavy", message_id=mid)
+    tap(bot, "p:20270329:5", message_id=mid)
+    tap(bot, "d:20270329", message_id=mid)
+    eve = edits(bot)[-1]
+    assert eve["text"] == (
+        "Lunes 29 de marzo: mucho, dolor 5. ¿Y el día de antes (domingo 28 de marzo), por la "
+        "tarde o por la noche, notaste algo distinto?"
+    )
+    assert buttons(eve["reply_markup"]) == [
+        "e:20270328:mood_changes",
+        "e:20270328:fatigue",
+        "e:20270328:abdominal_cramps",
+        "e:20270328:bloating",
+        "e:20270328:headache",
+        "e:20270328:lower_back_pain",
+        "ed:20270328",
+        "ed:20270328",
+    ]
+    labels = [b["text"] for row in eve["reply_markup"]["inline_keyboard"] for b in row]
+    assert labels[:3] == ["cambios de humor", "cansancio", "calambres"]
+    assert labels[-2:] == ["Nada especial", "Listo"]
+
+    tap(bot, "e:20270328:headache", message_id=mid)
+    tap(bot, "e:20270328:fatigue", message_id=mid)
+    eve = day(bot, date(2027, 3, 28))
+    assert (eve.flow, eve.symptoms, eve.cycle_start) == (None, ("fatigue", "headache"), False)
+    assert day(bot, date(2027, 3, 29)).cycle_start  # a symptom-only day never moves a start
+    marked = [b["text"] for row in edits(bot)[-1]["reply_markup"]["inline_keyboard"] for b in row]
+    assert "✓ dolor de cabeza" in marked and "✓ cansancio" in marked
+    assert edits(bot)[-1]["text"].startswith(
+        "Lunes 29 de marzo: mucho, dolor 5. ¿Y el día de antes"
+    )
+
+    tap(bot, "ed:20270328", message_id=mid)
+    assert edits(bot)[-1]["text"].startswith("Hecho: lunes 29 de marzo, día 1. Mucho, dolor 5.")
+    assert buttons(edits(bot)[-1]["reply_markup"]) == ["fix:20270329", "more:20270329"]
+    assert {e["message_id"] for e in edits(bot)} == {mid}
+
+
+def test_the_day_before_is_not_asked_when_it_already_says_something_or_for_a_later_day(make_bot):
+    noted = {date(2027, 3, 28): Day(date(2027, 3, 28), "telegram", symptoms=("bloating",))}
+    bot = make_bot(today=date(2027, 3, 29), log={**seed_log(), **noted})
+    tap(bot, "y:20270329:light")
+    tap(bot, "d:20270329")
+    assert edits(bot)[-1]["text"].startswith("Hecho: lunes 29 de marzo, día 1.")
+    assert day(bot, date(2027, 3, 28)).symptoms == ("bloating",)
+
+    later = make_bot()  # 2027-03-04, period day 4: not a start
+    tap(later, "f:20270304:light")
+    tap(later, "d:20270304")
+    assert later.tg.of("editMessageText")[-1]["text"].startswith("Hecho: jueves 4 de marzo, día 4.")
+
+
+def test_the_day_before_offers_what_she_logs_there_most(make_bot):
+    log = records.load(FIXTURES / "log_fictional.jsonl")
+    starts = records.starts(log)[-3:]
+    for s in starts:
+        eve = s - timedelta(days=1)
+        log[eve] = Day(eve, "telegram", symptoms=("breast_pain",))
+    bot = make_bot(today=starts[-1] + timedelta(days=40), log=log)
+    assert bot.eve_symptoms(bot.repo.load())[0] == "breast_pain"
 
 
 def test_not_yet_stores_nothing(make_bot):
@@ -375,6 +451,19 @@ def test_day_seven_says_the_bot_stops_asking_daily(make_bot):
         "cuando quieras; si dura bastante más de lo habitual, merece la pena comentarlo con tu "
         "médico."
     )
+
+
+def test_period_max_day_from_the_profile_moves_the_last_daily_ask(make_bot):
+    first = date(2027, 3, 1)
+    log = {
+        first + timedelta(days=i): Day(first + timedelta(days=i), "telegram", flow="light")
+        for i in range(4)
+    }
+    profile = PROFILE.replace('ask_at: "21:00"', 'ask_at: "21:00"\nperiod_max_day: 5')
+    bot = make_bot(log=log, today=date(2027, 3, 5), profile=profile)
+    tap(bot, "f:20270305:same")
+    assert "Llevamos 5 días, así que dejo de preguntarte cada día." in edits(bot)[-1]["text"]
+    assert bot.ask_due(at(date(2027, 3, 6))) is None  # day 6: nothing missing, no card
 
 
 def test_pain_high_goes_out_once_per_crossing(make_bot):
@@ -907,7 +996,7 @@ def test_without_an_assistant_free_text_gets_no_ai_and_the_keyboard(make_bot):
 # --- commands ------------------------------------------------------------------------------
 
 
-def test_the_menu_is_set_once_with_her_five_commands(make_bot):
+def test_the_menu_is_set_once_with_her_six_commands(make_bot):
     bot = make_bot()
     bot.set_commands()
     (call,) = bot.tg.of("setMyCommands")
@@ -915,6 +1004,7 @@ def test_the_menu_is_set_once_with_her_five_commands(make_bot):
         "hoy",
         "resumen",
         "anotar",
+        "hora",
         "deshacer",
         "ayuda",
     ]
@@ -1018,6 +1108,26 @@ def test_resumen_on_the_fictional_log(make_bot):
     )
 
 
+def test_resumen_tells_what_she_notices_before_a_start_from_three_starts(make_bot):
+    log = records.load(FIXTURES / "log_fictional.jsonl")
+    starts = records.starts(log)
+    marks = {1: ("mood_changes", "fatigue"), 2: ("fatigue",)}  # days before a start
+    for s, back in zip(starts[-3:], (1, 1, 2), strict=True):
+        eve = s - timedelta(days=back)
+        log[eve] = Day(eve, "telegram", symptoms=marks[back])
+    bot = make_bot(today=date(2025, 9, 10), log=log)
+    say(bot, "/resumen")
+    assert "• Antes de la regla sueles notar" not in bot.tg.texts()[-1]  # two starts only
+
+    eve = starts[-4] - timedelta(days=1)
+    log[eve] = Day(eve, "telegram", symptoms=("bloating",))
+    bot2 = make_bot(today=date(2025, 9, 10), log=log)
+    say(bot2, "/resumen")
+    assert bot2.tg.texts()[-1].endswith(
+        "• Antes de la regla sueles notar: cansancio, cambios de humor, hinchazón."
+    )
+
+
 def test_resumen_with_too_few_cycles_leaves_the_lengths_out(make_bot):
     bot = make_bot()  # two lengths in the seed
     say(bot, "/summary")
@@ -1044,8 +1154,8 @@ def test_estado_renders_every_phase_kind_through_its_locale_key(make_bot, kind, 
     assert bot.phase(bot.repo.load(), today).kind == kind
     say(bot, "/estado", user=ADMIN)
     assert bot.tg.texts()[-1] == (
-        f"Fase: {phase}. Hoy: aún no preguntado. Asistente: sin respuesta desde el arranque. "
-        "Datos: sincronizado."
+        f"Fase: {phase}. Hoy: aún no preguntado. Hora de la pregunta: 21:00. "
+        "Asistente: sin respuesta desde el arranque. Datos: sincronizado."
     )
 
 
@@ -1072,8 +1182,8 @@ def test_estado_tells_the_ask_the_assistant_and_unpushed_commits(make_bot):
     bot.repo._git("commit", "--allow-empty", "--quiet", "-m", "local")  # one not pushed
     say(bot, "/estado", user=ADMIN)
     assert bot.tg.texts()[-1] == (
-        "Fase: regla, día 4. Hoy: preguntado y respondido. Asistente: última respuesta hace 1 h. "
-        "Datos: 1 commit(s) sin subir."
+        "Fase: regla, día 4. Hoy: preguntado y respondido. Hora de la pregunta: 21:00. "
+        "Asistente: última respuesta hace 1 h. Datos: 1 commit(s) sin subir."
     )
     bot.repo.remote_ok = False
     bot.repo._git("reset", "--soft", "HEAD~1")
@@ -1085,7 +1195,10 @@ def test_estado_without_an_assistant(make_bot):
     bot = make_bot(profile=PROFILE.split("assistant:")[0])
     bot.kv.set("last_ask", "2027-03-04")
     say(bot, "/estado", user=ADMIN)
-    assert "Hoy: preguntado, sin respuesta. Asistente: sin asistente." in bot.tg.texts()[-1]
+    assert (
+        "Hoy: preguntado, sin respuesta. Hora de la pregunta: 21:00. Asistente: sin asistente."
+        in (bot.tg.texts()[-1])
+    )
 
 
 def test_nuevo_clears_the_pending_lines_and_the_conversation(make_bot):
@@ -1193,7 +1306,8 @@ def test_ayuda_and_presentacion(make_bot):
     say(bot, "/presentacion")  # her: nothing
     assert len(bot.tg.texts()) == 2
     say(bot, "/about", user=ADMIN)
-    assert bot.tg.texts()[-1].startswith("Hola. Llevo la cuenta del ciclo de Lucía")
+    assert bot.tg.texts()[-1].startswith("Hola. Soy el bot que lleva la cuenta del ciclo de Lucía")
+    assert "con una nota de voz" in bot.tg.texts()[-1]
     say(bot, "/presentacion", user=STRANGER)
     assert len(bot.tg.texts()) == 3
 
@@ -1530,3 +1644,142 @@ def test_a_turn_that_is_not_kept_never_runs_its_later(make_bot):
     drain(bot)
     assert ran == []
     assert bot.tg.texts()[-1].startswith("Ahora mismo no puedo leer")
+
+
+# --- settings from the chat ----------------------------------------------------------------
+
+
+def settings_block(text, values):
+    import json
+
+    return f"{text}\n\n```settings\n{json.dumps(values)}\n```"
+
+
+def committed(bot):
+    """The bot's checkout as a person sees it: the test profile committed and pushed, so the
+    settings commit and a pulled edit behave as they do on a real data repository."""
+    data = bot.data
+    git(data, "add", "cycle/profile.yaml", "plugins")
+    git(data, "commit", "--quiet", "-m", "profile")
+    git(data, "push", "--quiet", "origin", "main")
+    return data
+
+
+def test_a_settings_block_rewrites_the_profile_by_line_commits_and_takes_effect(make_bot):
+    profile = PROFILE.replace('ask_at: "21:00"', 'ask_at: "21:00"   # the evening ask')
+    bot = make_bot(profile=profile)
+    committed(bot)
+    plugin(bot).REPLIES.append(
+        settings_block("Hecho, te pregunto más tarde.", {"ask_at": "21:30", "period_max_day": 5})
+    )
+    say(bot, "pregúntame a las nueve y media", reply_to="x")
+    texts = bot.tg.texts()
+    assert texts[0] == "Hecho, te pregunto más tarde."  # the block never reaches her
+    assert texts[1] == (
+        "Ajustado: te pregunto a las 21:30; pregunto cada día hasta el día 5 de la regla."
+    )
+    text = (bot.data / "cycle" / "profile.yaml").read_text(encoding="utf-8")
+    assert text == profile.replace('"21:00"', '"21:30"') + "period_max_day: 5\n"
+    assert git(bot.data, "log", "-1", "--format=%s").strip() == (
+        "settings: ask_at 21:30, period_max_day 5"
+    )
+    assert bot.repo.unpushed() == 0  # pushed at once: the log was clean
+    assert (bot.profile.ask_at, bot.profile.period_max_day, bot.max_day) == ("21:30", 5, 5)
+
+
+def test_a_refused_settings_block_changes_nothing(make_bot, caplog):
+    bot = make_bot()
+    path = bot.data / "cycle" / "profile.yaml"
+    before = path.read_bytes()
+    for values in (
+        {"ask_at": "04:30"},
+        {"ask_at": "21:30", "period_max_day": 15},
+        {"ask_at": "21:30", "language": "en"},
+        {"period_max_day": "7"},
+        {},
+    ):
+        plugin(bot).REPLIES.append(settings_block("Vale.", values))
+        say(bot, "cambia la hora", reply_to="x")
+        assert bot.tg.texts()[-1].startswith("No he podido aplicar ese cambio")
+    plugin(bot).REPLIES.append("Vale.\n\n```settings\n{not json\n```")
+    say(bot, "cambia la hora", reply_to="x")
+    assert bot.tg.texts()[-1].startswith("No he podido aplicar ese cambio")
+    assert path.read_bytes() == before
+    assert bot.profile.ask_at == "21:00"
+    assert "settings refused: unknown_key" in caplog.text
+    assert "04:30" not in caplog.text
+
+
+def test_hora_sets_the_ask_hour_without_the_assistant_and_the_next_tick_uses_it(make_bot):
+    bot = make_bot(today=date(2027, 3, 27))  # waiting: the card is due at ask_at
+    committed(bot)
+    say(bot, "/hora 22:15")
+    assert bot.tg.texts()[-1] == "Ajustado: te pregunto a las 22:15."
+    assert plugin(bot).CALLS == []
+    assert 'ask_at: "22:15"' in (bot.data / "cycle" / "profile.yaml").read_text()
+    bot.tick(at(date(2027, 3, 27), 21, 30))
+    assert bot.tg.of("sendMessage")[-1]["text"] == "Ajustado: te pregunto a las 22:15."
+    bot.tick(at(date(2027, 3, 27), 22, 15))
+    assert bot.tg.texts()[-1].startswith("@lucia_example, por tus últimos ciclos")
+    say(bot, "/time 4:00", user=ADMIN)
+    assert bot.tg.texts()[-1].startswith("No he podido aplicar ese cambio")
+    say(bot, "/hora", user=ADMIN)
+    assert bot.tg.texts()[-1].startswith("No he podido aplicar ese cambio")
+    n = len(bot.tg.texts())
+    say(bot, "/hora 20:00", user=STRANGER)
+    assert len(bot.tg.texts()) == n
+    assert bot.profile.ask_at == "22:15"
+
+
+def test_a_profile_pulled_from_the_remote_is_reloaded_and_a_bad_one_refused(make_bot, caplog):
+    caplog.set_level(logging.INFO, logger="sct")
+    bot = make_bot()
+    committed(bot)
+    human = bot.data.parent / "human"
+
+    def push_profile(text):
+        git(human, "pull", "--quiet")
+        (human / "cycle" / "profile.yaml").write_text(text, encoding="utf-8")
+        git(human, "commit", "--quiet", "-am", "profile")
+        git(human, "push", "--quiet")
+
+    push_profile(PROFILE.replace('ask_at: "21:00"', 'ask_at: "20:00"\nperiod_max_day: 9'))
+    bot.tick()
+    assert (bot.profile.ask_at, bot.max_day) == ("20:00", 9)
+    assert "profile reloaded" in caplog.text
+
+    push_profile(PROFILE.replace('ask_at: "21:00"', 'ask_at: "03:00"'))
+    bot.repo._last_pull = None  # the next hourly pull, now
+    bot.tick()
+    assert "profile reload refused: bad_ask_at" in caplog.text
+    assert bot.profile.ask_at == "20:00"  # the old one stays
+
+
+def test_set_profile_lines_keeps_every_other_byte():
+    text = 'name: Lucía  # her\nask_at: "21:00"   # evening\r\ntelegram:\n  ask_at: nested\n'
+    out = set_profile_lines(text, {"ask_at": "21:30", "period_max_day": 5})
+    assert out == (
+        'name: Lucía  # her\nask_at: "21:30"   # evening\r\ntelegram:\n  ask_at: nested\n'
+        "period_max_day: 5\n"
+    )
+    assert set_profile_lines("name: A", {"ask_at": "06:00"}) == 'name: A\nask_at: "06:00"\n'
+    assert set_profile_lines("ask_at: 1260\n", {"ask_at": "21:30"}) == 'ask_at: "21:30"\n'
+
+
+def test_validate_settings_is_all_or_nothing():
+    assert validate_settings({"period_max_day": 3, "ask_at": "5:00"}) == {
+        "ask_at": "05:00",
+        "period_max_day": 3,
+    }
+    assert validate_settings({"ask_at": "23:59"}) == {"ask_at": "23:59"}
+    for bad, code in (
+        ({"ask_at": "24:00"}, "bad_ask_at"),
+        ({"ask_at": 1260}, "bad_ask_at"),
+        ({"period_max_day": 2}, "bad_period_max_day"),
+        ({"period_max_day": True}, "bad_period_max_day"),
+        ({"ask_at": "21:00", "x": 1}, "unknown_key"),
+        ({}, "bad_settings"),
+        ([], "bad_settings"),
+    ):
+        with pytest.raises(ValueError, match=code):
+            validate_settings(bad)

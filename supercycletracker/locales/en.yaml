@@ -12,6 +12,7 @@ ask_catchup: "{m}, to close this period I am missing {date}. Do you remember rou
 ask_fix: "{m}, let us fix {date}. How should I note it?"
 ask_pain: "{done} And the pain? 0 is none, 10 the worst you know."
 ask_symptoms: "{done} Anything else? Tap what you notice, then «Done»."
+ask_eve: "{done} And the day before ({date}), in the afternoon or evening, did you notice anything different?"
 card_done: "Done: {date}, day {n}. {summary}"
 next_today: "Noted {date}. Now, how is today, {next}?"
 next_gap: "Noted {date}. Now, how was {next}?"
@@ -20,7 +21,7 @@ not_yet: "OK. I will ask again tomorrow."
 skipped: "No problem, I leave {date} blank."
 pick_day: "Which day did it start?"
 closed: "That closes this period: {days} days, from {start} to {end}. The next one should come around {expected} (between {ws} and {we}). I will not bother you until then."
-day7: "That is 7 days, so I stop asking every day. If it goes on, tell me with /hoy whenever you like; if it lasts much longer than usual, it is worth mentioning to your doctor."
+day7: "That is {n} days, so I stop asking every day. If it goes on, tell me with /hoy whenever you like; if it lasts much longer than usual, it is worth mentioning to your doctor."
 tell_me: "{m}, tell me. I am listening."
 placeholder: "E.g.: light, pain 3, bloated"
 
@@ -46,6 +47,10 @@ toast_old: "That card is too old, so I saved nothing."
 toast_error: "Something went wrong, so I saved nothing."
 undo_done: "Undone: {what}."
 undo_none: "Nothing to undo."
+invalid_settings: "I could not apply that change, so I left everything as it was. The hour goes from 05:00 to 23:59 (for example, /hora 21:30) and the last day I ask, from 3 to 14."
+settings_done: "Changed: {what}."
+settings_ask_at: "I ask you at {time}"
+settings_period_max_day: "I ask every day up to day {n} of the period"
 
 # --- /resumen ------------------------------------------------------------------------------
 summary_title: "Your cycle, {name}:"
@@ -54,10 +59,11 @@ summary_lengths: "• Recent cycles: {lengths} days (your usual: {median})."
 summary_period: "• Usual length: {days} days."
 summary_next: "• Next: around {expected} (between {ws} and {we})."
 summary_symptoms: "• What you log most: {items}."
+summary_eve: "• Before your period you usually notice: {items}."
 summary_empty: "I do not have enough data yet."
 
 # --- /estado: one key per Phase.kind and per state ----------------------------------------
-status: "Phase: {phase}. Today: {asked}. Assistant: {ai}. Data: {git}."
+status: "Phase: {phase}. Today: {asked}. Ask time: {ask_at}. Assistant: {ai}. Data: {git}."
 phase_no_history: "no history"
 phase_quiet: "quiet until {ws}"
 phase_waiting: "waiting ({ws} to {we})"
@@ -83,6 +89,7 @@ menu:
   hoy: "Today's question, or tell me something"
   resumen: "Your cycle in a few lines"
   anotar: "Note a day without the assistant"
+  hora: "Change the time I ask"
   deshacer: "Undo the last thing I noted"
   ayuda: "What I understand"
 help: |-
@@ -90,6 +97,7 @@ help: |-
   /hoy: today's question; with text after it, you tell me
   /resumen: your cycle in a few lines
   /anotar yesterday heavy 6 cramps: note a day without the assistant
+  /hora 21:30: change the time I ask
   /deshacer: undo the last thing I noted
   /ayuda: this list
   You can also reply to any of my messages.
@@ -99,10 +107,11 @@ help_admin: |-
   /nuevo: start a fresh conversation with the assistant
   /presentacion: post the introduction
 intro: |-
-  Hello. I keep track of {name}'s cycle in this group.
-  On the days her period is likely, I ask in the evening with buttons: one tap is enough.
-  She can also reply to any of my messages in her own words, and I note it.
-  She can ask me about her cycle too; I answer with her own history in mind.
+  Hello. I am the bot that keeps track of {name}'s cycle in this group.
+  On the days her period is likely, I ask in the evening with buttons: one tap is enough. While it lasts, I ask every day how it is going, and about the day before too.
+  She can reply to any of my messages in her own words or with a voice note, and I note it.
+  She can ask me about her cycle or her health; I answer with her own history in mind and look things up in reliable sources.
+  If she wants to change something (the time I ask, how I work), she only has to ask me.
   What I note is kept in a private repository of this household. To understand what she writes and answer her questions, an AI assistant reads her messages and her history.
   /ayuda lists what I understand.
 
@@ -122,6 +131,7 @@ btn_dont_remember: "I don't remember"
 btn_tell_more: "Tell you more"
 btn_other: "Other: I'll write it"
 btn_done: "Done"
+btn_nothing: "Nothing special"
 btn_fix: "Fix"
 btn_back: "Back"
 

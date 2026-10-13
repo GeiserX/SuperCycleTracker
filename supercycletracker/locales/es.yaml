@@ -10,6 +10,7 @@ ask_catchup: "{m}, para cerrar esta regla me falta el {date}. ¿Te acuerdas más
 ask_fix: "{m}, vamos a corregir el {date}. ¿Cómo lo apunto?"
 ask_pain: "{done} ¿Y el dolor? 0 es nada y 10, el peor que conoces."
 ask_symptoms: "{done} ¿Algo más? Marca lo que notes y pulsa «Listo»."
+ask_eve: "{done} ¿Y el día de antes ({date}), por la tarde o por la noche, notaste algo distinto?"
 card_done: "Hecho: {date}, día {n}. {summary}"
 next_today: "Anotado el {date}. Ahora, ¿cómo va hoy, {next}?"
 next_gap: "Anotado el {date}. Ahora, ¿cómo fue el {next}?"
@@ -18,7 +19,7 @@ not_yet: "Vale. Mañana te vuelvo a preguntar."
 skipped: "No pasa nada, dejo el {date} en blanco."
 pick_day: "¿Qué día te bajó?"
 closed: "Cierro esta regla: {days} días, del {start} al {end}. La próxima, hacia el {expected} (entre el {ws} y el {we}). Hasta entonces no te molesto."
-day7: "Llevamos 7 días, así que dejo de preguntarte cada día. Si sigue, cuéntamelo con /hoy cuando quieras; si dura bastante más de lo habitual, merece la pena comentarlo con tu médico."
+day7: "Llevamos {n} días, así que dejo de preguntarte cada día. Si sigue, cuéntamelo con /hoy cuando quieras; si dura bastante más de lo habitual, merece la pena comentarlo con tu médico."
 tell_me: "{m}, cuéntame. Te leo."
 placeholder: "Ej.: poco, dolor 3, hinchada"
 
@@ -44,6 +45,10 @@ toast_old: "Esa tarjeta es demasiado antigua, así que no he guardado nada."
 toast_error: "Algo ha fallado, así que no he guardado nada."
 undo_done: "Deshecho: {what}."
 undo_none: "No hay nada que deshacer."
+invalid_settings: "No he podido aplicar ese cambio, así que lo dejo todo como estaba. La hora va de 05:00 a 23:59 (por ejemplo, /hora 21:30) y el último día que pregunto, del 3 al 14."
+settings_done: "Ajustado: {what}."
+settings_ask_at: "te pregunto a las {time}"
+settings_period_max_day: "pregunto cada día hasta el día {n} de la regla"
 
 # --- /resumen ------------------------------------------------------------------------------
 summary_title: "Tu ciclo, {name}:"
@@ -52,10 +57,11 @@ summary_lengths: "• Ciclos recientes: {lengths} días (lo normal en ti: {media
 summary_period: "• Duración habitual: {days} días."
 summary_next: "• Próxima: hacia el {expected} (entre el {ws} y el {we})."
 summary_symptoms: "• Lo que más anotas: {items}."
+summary_eve: "• Antes de la regla sueles notar: {items}."
 summary_empty: "Aún no tengo datos suficientes."
 
 # --- /estado -------------------------------------------------------------------------------
-status: "Fase: {phase}. Hoy: {asked}. Asistente: {ai}. Datos: {git}."
+status: "Fase: {phase}. Hoy: {asked}. Hora de la pregunta: {ask_at}. Asistente: {ai}. Datos: {git}."
 phase_no_history: "sin historial"
 phase_quiet: "tranquila hasta el {ws}"
 phase_waiting: "esperando (del {ws} al {we})"
@@ -81,6 +87,7 @@ menu:
   hoy: "La pregunta de hoy, o cuéntame algo"
   resumen: "Tu ciclo en pocas líneas"
   anotar: "Anotar un día sin el asistente"
+  hora: "Cambiar la hora a la que pregunto"
   deshacer: "Deshacer lo último que anoté"
   ayuda: "Lo que entiendo"
 help: |-
@@ -88,6 +95,7 @@ help: |-
   /hoy: la pregunta de hoy; con texto detrás, me lo cuentas
   /resumen: tu ciclo en pocas líneas
   /anotar ayer mucho 6 calambres: anotar un día sin el asistente
+  /hora 21:30: cambiar la hora a la que pregunto
   /deshacer: deshacer lo último que anoté
   /ayuda: esta lista
   También puedes responder a cualquiera de mis mensajes.
@@ -97,10 +105,11 @@ help_admin: |-
   /nuevo: empezar una conversación nueva con el asistente
   /presentacion: publicar la presentación
 intro: |-
-  Hola. Llevo la cuenta del ciclo de {name} en este grupo.
-  Los días en que la regla puede llegarle, le pregunto por la noche con botones: basta con un toque.
-  También puede responder a cualquiera de mis mensajes con sus palabras, y lo anoto.
-  Puede preguntarme dudas sobre su ciclo; le contesto teniendo en cuenta su propio historial.
+  Hola. Soy el bot que lleva la cuenta del ciclo de {name} en este grupo.
+  Los días en que la regla puede llegarle, le pregunto por la noche con botones: basta con un toque. Mientras dura, pregunto cada día cómo va, y también por el día de antes.
+  Puede responder a cualquiera de mis mensajes con sus palabras o con una nota de voz, y lo anoto.
+  Puede preguntarme dudas sobre su ciclo o su salud; contesto teniendo en cuenta su propio historial y busco en fuentes fiables.
+  Si quiere cambiar algo (la hora a la que pregunto, cómo funciono), basta con pedírmelo.
   Lo que anoto se guarda en un repositorio privado de esta casa. Para entender lo que escribe y contestar sus dudas, un asistente de IA lee sus mensajes y su historial.
   /ayuda tiene la lista de lo que entiendo.
 
@@ -120,6 +129,7 @@ btn_dont_remember: "No me acuerdo"
 btn_tell_more: "Contarte más"
 btn_other: "Otro: escríbemelo"
 btn_done: "Listo"
+btn_nothing: "Nada especial"
 btn_fix: "Corregir"
 btn_back: "Volver"
 

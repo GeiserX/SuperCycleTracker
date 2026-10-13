@@ -256,6 +256,20 @@ def test_extract_without_a_block_or_with_a_broken_one():
     assert (clean, block) == ("Hecho.", BAD_BLOCK)
 
 
+def test_extract_takes_a_settings_block_apart_from_the_record_block():
+    text = (
+        "Vale.\n\n```record\n"
+        '{"days": [{"date": "2025-01-02", "flow": "light"}], "delete": []}\n```\n'
+        '```settings\n{"ask_at": "21:30"}\n```'
+    )
+    clean, record = assistant.extract(text)
+    assert record == {"days": [{"date": "2025-01-02", "flow": "light"}], "delete": []}
+    assert assistant.extract(clean, "settings") == ("Vale.", {"ask_at": "21:30"})
+    assert assistant.extract(text, "settings")[1] == {"ask_at": "21:30"}
+    assert assistant.extract("Vale.\n```settings\n{", "settings") == ("Vale.", BAD_BLOCK)
+    assert assistant.extract("Vale.", "settings") == ("Vale.", None)
+
+
 # --- context.md ----------------------------------------------------------------------------
 
 

@@ -103,7 +103,8 @@ There is no merging logic to reason about.
   cycle/log.jsonl`): the whole uncommitted batch goes, nothing is committed.
 - When it is clean and `HEAD` is a `log: <dates>` commit by the bot, `/deshacer` restores the file
   from `HEAD~1` and commits `undo: <dates>`.
-- Otherwise («undo:» on top, a person's commit on top, nothing to restore): «No hay nada que deshacer.»
+- Otherwise («undo:» or «settings:» on top, a person's commit on top, nothing to restore): «No hay
+  nada que deshacer.»
 
 The reply lists the dates that went back. One check-in = one commit = one undo, and no second copy of
 the state. «Corregir» is not an undo: it reopens the flow step for that date and replaces fields.
@@ -150,8 +151,10 @@ class Phase:
 For bot day `T`, latest start `S <= T`, `n = T - S + 1`:
 
 - **open period**: `S` exists, the latest record dated in `[S, T]` that has a `flow` is a bleed day (a
-  `none` closes it; a bleed day after a `none` reopens it), and `n <= 7`, or `n == 8` with missing days
-  (the catch-up day: the bot asks for the gaps once more, never for day 8 itself).
+  `none` closes it; a bleed day after a `none` reopens it), and `n <= M`, or `n == M + 1` with missing
+  days (the catch-up day: the bot asks for the gaps once more, never for that day itself). `M` is the
+  profile's `period_max_day` (default 7, between 3 and 14), passed into `phase` and `queue`; the
+  rest of this section writes it with its default, 7.
 - **missing**: dates in `[max(S, T-3), T-1]` with no `flow`, not marked "no me acuerdo", and before the
   closing `none` if there is one. Days older than three are never nagged about, but they are still
   accepted when she reports them.
@@ -172,8 +175,9 @@ Rules across phases:
   00:30 still asks, because `T` is still yesterday's bot day and `ask_dt + 2 h` is 01:00.
 - **Spontaneous reports in every phase.** A start reported early opens `period` at once. A start
   back-dated four days opens `period` on day 5 with the gaps queued.
-- **Day-7 limit.** On day 7 the card's done step says the bot stops asking daily; reports are still
-  accepted. The assistant's rules raise bleeding past 7 days kindly if she writes.
+- **Day-7 limit.** On day `period_max_day` (7 unless the profile says otherwise) the card's done step
+  says the bot stops asking daily; reports are still accepted. The assistant's rules raise bleeding
+  past 7 days kindly if she writes, whatever the setting.
 - **Closing.** A write whose `Change` turns an open period into a closed one (phase computed before and
   after the write) posts the closing line with the new prediction. No flag is stored: the transition
   is in the `Change`, so a close that is undone and redone posts again, which is right.
@@ -239,6 +243,27 @@ Miércoles 21: normal, dolor 4. ¿Algo más? Marca lo que notes y pulsa «Listo�
 
 The six are her most frequent symptoms in the log, padded with defaults in that order.
 
+**Eve step** (the day before a start, toggles):
+
+```
+Lunes 29 de marzo: mucho, dolor 5. ¿Y el día de antes (domingo 28 de marzo), por la tarde o por la noche, notaste algo distinto?
+[Cambios de humor] [Cansancio] [Calambres]
+[Hinchazón] [Dolor de cabeza] [Dolor lumbar]
+[Nada especial] [Listo]
+```
+
+When «Listo» on the symptoms step finishes a day `d` that is a cycle start (`log[d].cycle_start`
+after the write), the card asks about `d-1` before the done step. A start can only come from the
+card's `y:` or `f:` taps, so this is the card's path only. The step is bound to `d-1`: a toggle
+writes `symptoms` on that day, which makes a symptom-only day (no `flow`), so it can never move a
+start. «Nada especial» and «Listo» both finish the step and go on with `d` exactly as «Listo» would
+have: the next queued date, or the done step. The step is skipped when `d-1` already has a flow or
+a symptom, and when `d-1` is older than the 90 days a tap may write. The six toggles are the
+symptoms she logs most on the day before a start, padded with `mood_changes`, `fatigue`,
+`abdominal_cramps`, `bloating`, `headache`, `lower_back_pain` in that order. Words take another
+path: the assistant's rules (5.3) ask once about the evening before when she reports a start, and
+record the answer as symptoms of that day.
+
 **Done step:**
 
 ```
@@ -258,7 +283,9 @@ typing; a later day can be one tap.
 | `f:YYYYMMDD:none\|light\|medium\|heavy\|same` | flow for that day; `same` copies the previous day |
 | `p:YYYYMMDD:0..10` | pain |
 | `s:YYYYMMDD:<symptom id>` | toggle a symptom |
-| `d:YYYYMMDD` | «Listo»: next queued date, or finish |
+| `d:YYYYMMDD` | «Listo»: the eve step when that day is a start, else the next queued date, or finish |
+| `e:YYYYMMDD:<symptom id>` | toggle a symptom on the day before a start (the eve step is bound to that day) |
+| `ed:YYYYMMDD` | «Nada especial» or «Listo» on the eve step: go on with the start, the day after it |
 | `pick:YYYYMMDD` / `back:YYYYMMDD` | open the day picker / return to the waiting card |
 | `wait:YYYYMMDD` | «Todavía no» |
 | `skip:YYYYMMDD` | «No me acuerdo» |
@@ -332,19 +359,20 @@ because they work with the assistant down.
 ### 4.4 Commands
 
 Spanish names first, English aliases second; both are accepted, and `/cmd@botname` too. The bot sets
-the menu itself with one `setMyCommands` call at start (default scope, the five she uses: hoy,
-resumen, anotar, deshacer, ayuda); the admin commands are listed by `/ayuda` when an admin asks.
+the menu itself with one `setMyCommands` call at start (default scope, the six she uses: hoy,
+resumen, anotar, hora, deshacer, ayuda); the admin commands are listed by `/ayuda` when an admin asks.
 Nothing is set in BotFather, which this call would overwrite anyway.
 
 | command | who | does |
 |---|---|---|
 | `/hoy` (`/today`) `[texto]` | her, admins | sends today's card; with text, the text goes to the assistant bound to today |
-| `/resumen` (`/summary`) | her, admins | last period, recent lengths (with at least three), usual length, next window, the three symptoms logged most; no AI |
+| `/resumen` (`/summary`) | her, admins | last period, recent lengths (with at least three), usual length, next window, the three symptoms logged most, and, once at least three starts have a symptom logged on the day before, the three symptoms logged most on the two days before a start; no AI |
 | `/anotar` (`/log`) `<cuándo> <cuánto> [dolor] [síntomas…]` | her, admins | deterministic, no AI: `/anotar ayer mucho 6 calambres hinchazón`. `cuándo` is hoy, ayer, anteayer, a weekday (the most recent past one), `D/M` or `YYYY-MM-DD`; `cuánto` is nada, poco, normal, mucho; an integer 0..10 is pain; the rest are symptom labels matched by prefix |
+| `/hora` (`/time`) `HH:MM` | her, admins | deterministic, no AI: the hour of the daily ask, through the same check and the same commit as a `settings` block (5.5) |
 | `/deshacer` (`/undo`) | her, admins | undoes the last check-in: the uncommitted batch, else the last `log:` commit (2.2) |
-| `/estado` (`/status`) | admins | phase, whether today was asked and answered, when the assistant last answered, git sync state |
+| `/estado` (`/status`) | admins | phase, whether today was asked and answered, the ask hour, when the assistant last answered, git sync state |
 | `/nuevo` (`/new`) | admins | drop the assistant conversation; the next turn starts fresh |
-| `/presentacion` (`/about`) | admins | posts the introduction text once, when an admin asks for it |
+| `/presentacion` (`/about`) | admins | posts the introduction text once, when an admin asks for it (`sct say --intro` posts the same text from the host) |
 | `/ayuda` (`/help`) | anyone allowed | the list |
 
 ## 5. From words to a record
@@ -459,6 +487,21 @@ martes"), end your answer with exactly one block and nothing after it:
 - Symptom ids: {symptom_ids}. Anything else goes in "note", in her words.
 - To fix a wrong day, send it again with the right value; to remove one, put its date in "delete".
 - A question with no new facts gets no block.
+- When she says her period began and says nothing about the day before, ask once, briefly,
+  whether she noticed anything different that afternoon or evening. Record what she answers as
+  symptoms of that day, with no flow.
+
+Settings
+When she asks to change the hour the bot asks her, or up to which period day it asks every day,
+end your answer with one settings block (after the record block, if there is one) and nothing
+after it; the bot confirms what it changed:
+
+```settings
+{"ask_at": "21:30", "period_max_day": 7}
+```
+- "ask_at" is "HH:MM" from 05:00 to 23:59; "period_max_day" is a whole number from 3 to 14.
+- Send only the keys she wants changed; context.md has the current values.
+- If what she asks is outside those limits, tell her the limits and send no block.
 {instructions}
 ```
 
@@ -470,6 +513,7 @@ Friday (viernes) 2025-03-14, 21:14 Europe/Madrid. Bot day 2025-03-14 (a day ends
 
 # Where she is
 Period day 3 (started Wednesday 2025-03-12). The bot asked at 21:00 about today; not answered yet.
+During a period it asks every day up to period day 7.
 Missing days the bot still wants: Thursday 2025-03-13.
 
 # Prediction (last 6 cycles)
@@ -498,13 +542,47 @@ scratch with its own dates and a dozen starts, never copied or shifted from a re
 
 ### 5.4 Without the assistant, or with it down
 
-- Buttons, `/hoy`, `/anotar`, `/resumen`, `/deshacer`, `/estado` work with no assistant at all.
+- Buttons, `/hoy`, `/anotar`, `/hora`, `/resumen`, `/deshacer`, `/estado` work with no assistant at
+  all.
 - Free text with `assistant.plugin` unset: «Sin el asistente no entiendo mensajes escritos. Puedes
   anotarlo con los botones:» plus today's keyboard.
 - The plugin raises, runs out of time or returns `kept: false`: «Ahora mismo no puedo leer mensajes
   escritos. Puedes anotarlo con los botones y, si me lo vuelves a escribir más tarde, lo leo.» plus the
   keyboard. No block is applied. Her message stays pending and goes with her next one. Nothing is
   retried in the background.
+
+### 5.5 Settings from the chat
+
+Two profile keys can be changed from the chat: `ask_at` and `period_max_day`. When she asks the
+assistant ("pregúntame más tarde", "pregunta solo hasta el quinto día"), it ends its answer with a
+second kind of fenced block, after the record block if there is one:
+
+````
+```settings
+{"ask_at": "21:30", "period_max_day": 7}
+```
+````
+
+`assistant.extract(text, "settings")` takes it out like a record block, so she never sees it. The
+same check serves the command `/hora HH:MM`, with no AI. `validate_settings` is all or nothing: at
+least one key and no other, `ask_at` "HH:MM" from 05:00 to 23:59 (`ASK_EARLIEST`, 3.1) and
+`period_max_day` a whole number from 3 to 14. Anything else applies nothing and the bot answers
+`invalid_settings`; the log line is the reason code only.
+
+A valid block rewrites `cycle/profile.yaml` **by line**: the value on the existing top-level `key:`
+line is replaced, its trailing comment kept, and every other line stays byte-identical; a key that
+is not there is appended as a top-level line. `ask_at` is written quoted, since YAML 1.1 reads an
+unquoted 21:30 as a number. The new text must load as a profile that passes `sct check` and holds
+the new values, or nothing is written. Under `DATA_LOCK` the file is replaced atomically and
+committed alone as `settings: ask_at 21:30` (one commit per block); a commit that fails puts the old
+text back and the bot answers `toast_error`. Then the bot runs `flush()`, which pushes at once when
+the log is clean and with the next check-in commit otherwise, uses the new profile in memory (the
+scheduler reads `ask_at` on its next tick) and confirms with `settings_done`: «Ajustado: te pregunto
+a las 21:30.» A `settings:` commit is never undone by `/deshacer`.
+
+The other direction is the hourly pull (section 8): a pull that changes `profile.yaml` makes the bot
+reload it on the same tick. A profile that fails the checks of `sct check` is refused, the old one
+stays in use and the log says `profile reload refused: <codes>`.
 
 ## 6. The plugin contract (public app ⇄ assistant plugin)
 
@@ -562,8 +640,8 @@ Return value, either a bare string (no conversation kept) or:
   turn. A plugin that has a usable answer returns `kept: true` with it.
 - The plugin must return before `settings.timeout_s`; the app cannot stop its thread. A plugin that
   outlives the wait would store a turn the app never saw.
-- The record block comes back inside `text`; the app extracts it. A provider that strips fenced blocks
-  must leave `record` alone.
+- The record and settings blocks come back inside `text`; the app extracts them. A provider that
+  strips fenced blocks must leave `record` and `settings` alone.
 - **`later`** (optional): a callable with no arguments that returns a string. It is how a plugin
   reports something slow, such as a change it is making that takes minutes, without holding the turn.
   The app runs it after it has posted `text` (and applied the block), on one background thread: one
@@ -593,6 +671,7 @@ locale. English source strings and their Spanish translations:
 | `ask_catchup` | {m}, to close this period I am missing {date}. Do you remember roughly how it was? | {m}, para cerrar esta regla me falta el {date}. ¿Te acuerdas más o menos de cómo fue? |
 | `ask_pain` | {done} And the pain? 0 is none, 10 the worst you know. | {done} ¿Y el dolor? 0 es nada y 10, el peor que conoces. |
 | `ask_symptoms` | {done} Anything else? Tap what you notice, then «Done». | {done} ¿Algo más? Marca lo que notes y pulsa «Listo». |
+| `ask_eve` | {done} And the day before ({date}), in the afternoon or evening, did you notice anything different? | {done} ¿Y el día de antes ({date}), por la tarde o por la noche, notaste algo distinto? |
 | `card_done` | Done: {date}, day {n}. {summary} | Hecho: {date}, día {n}. {summary} |
 | `next_today` | Noted {date}. Now, how is today, {next}? | Anotado el {date}. Ahora, ¿cómo va hoy, {next}? |
 | `next_gap` | Noted {date}. Now, how was {next}? | Anotado el {date}. Ahora, ¿cómo fue el {next}? |
@@ -601,7 +680,7 @@ locale. English source strings and their Spanish translations:
 | `skipped` | No problem, I leave {date} blank. | No pasa nada, dejo el {date} en blanco. |
 | `pick_day` | Which day did it start? | ¿Qué día te bajó? |
 | `closed` | That closes this period: {days} days, from {start} to {end}. The next one should come around {expected} (between {ws} and {we}). I will not bother you until then. | Cierro esta regla: {days} días, del {start} al {end}. La próxima, hacia el {expected} (entre el {ws} y el {we}). Hasta entonces no te molesto. |
-| `day7` | That is 7 days, so I stop asking every day. If it goes on, tell me with /hoy whenever you like; if it lasts much longer than usual, it is worth mentioning to your doctor. | Llevamos 7 días, así que dejo de preguntarte cada día. Si sigue, cuéntamelo con /hoy cuando quieras; si dura bastante más de lo habitual, merece la pena comentarlo con tu médico. |
+| `day7` | That is {n} days, so I stop asking every day. If it goes on, tell me with /hoy whenever you like; if it lasts much longer than usual, it is worth mentioning to your doctor. | Llevamos {n} días, así que dejo de preguntarte cada día. Si sigue, cuéntamelo con /hoy cuando quieras; si dura bastante más de lo habitual, merece la pena comentarlo con tu médico. |
 | `tell_me` | {m}, tell me. I am listening. | {m}, cuéntame. Te leo. |
 | `placeholder` | E.g.: light, pain 3, bloated | Ej.: poco, dolor 3, hinchada |
 | `recorded` | Noted: | Anotado: |
@@ -621,14 +700,18 @@ locale. English source strings and their Spanish translations:
 | `only_her` | This is only for {name}. | Esto es solo para {name}. |
 | `toast_saved` | Noted: {what} | Apuntado: {what} |
 | `undo_done` / `undo_none` | Undone: {what}. / Nothing to undo. | Deshecho: {what}. / No hay nada que deshacer. |
+| `invalid_settings` | I could not apply that change, so I left everything as it was. The hour goes from 05:00 to 23:59 (for example, /hora 21:30) and the last day I ask, from 3 to 14. | No he podido aplicar ese cambio, así que lo dejo todo como estaba. La hora va de 05:00 a 23:59 (por ejemplo, /hora 21:30) y el último día que pregunto, del 3 al 14. |
+| `settings_done` | Changed: {what}. | Ajustado: {what}. |
+| `settings_ask_at` / `settings_period_max_day` | I ask you at {time} / I ask every day up to day {n} of the period | te pregunto a las {time} / pregunto cada día hasta el día {n} de la regla |
 | `summary_title` | Your cycle, {name}: | Tu ciclo, {name}: |
 | `summary_last` | • Last period: {start}, {days} day(s) logged. | • Última regla: {start}, {days} día(s) apuntado(s). |
 | `summary_lengths` | • Recent cycles: {lengths} days (your usual: {median}). | • Ciclos recientes: {lengths} días (lo normal en ti: {median}). |
 | `summary_period` | • Usual length: {days} days. | • Duración habitual: {days} días. |
 | `summary_next` | • Next: around {expected} (between {ws} and {we}). | • Próxima: hacia el {expected} (entre el {ws} y el {we}). |
 | `summary_symptoms` | • What you log most: {items}. | • Lo que más anotas: {items}. |
+| `summary_eve` | • Before your period you usually notice: {items}. | • Antes de la regla sueles notar: {items}. |
 | `summary_empty` | I do not have enough data yet. | Aún no tengo datos suficientes. |
-| `status` | Phase: {phase}. Today: {asked}. Assistant: {ai}. Data: {git}. | Fase: {phase}. Hoy: {asked}. Asistente: {ai}. Datos: {git}. |
+| `status` | Phase: {phase}. Today: {asked}. Ask time: {ask_at}. Assistant: {ai}. Data: {git}. | Fase: {phase}. Hoy: {asked}. Hora de la pregunta: {ask_at}. Asistente: {ai}. Datos: {git}. |
 | `phase_no_history` / `phase_quiet` / `phase_waiting` / `phase_late` / `phase_period` | no history / quiet until {ws} / waiting ({ws} to {we}) / late since {we} / period day {n} | sin historial / tranquila hasta el {ws} / esperando (del {ws} al {we}) / con retraso desde el {we} / regla, día {n} |
 | `status_asked` / `status_answered` / `status_not_asked` | asked, no answer yet / asked and answered / not asked yet | preguntado, sin respuesta / preguntado y respondido / aún no preguntado |
 | `status_ai_ok` / `status_ai_never` / `status_ai_none` | last answer {ago} ago / no answer since start / no assistant configured | última respuesta hace {ago} / sin respuesta desde el arranque / sin asistente |
@@ -638,7 +721,7 @@ locale. English source strings and their Spanish translations:
 | `new_conversation` | Starting a fresh conversation. What is noted stays. | Empiezo una conversación nueva. Lo apuntado sigue igual. |
 | `test_mark` | (test) | (prueba) |
 | `menu` | the descriptions of the five commands in the menu | idem |
-| buttons | Yes, light · Yes, medium · Yes, heavy · Yes, another day · Not yet · Light · Medium · Heavy · Same as yesterday · It stopped · It had stopped that day · I don't remember · Tell you more · Other: I'll write it · Done · Fix · Back | Sí, poco · Sí, normal · Sí, mucho · Sí, otro día · Todavía no · Poco · Normal · Mucho · Igual que ayer · Ya no sangro · Ese día ya no sangraba · No me acuerdo · Contarte más · Otro: escríbemelo · Listo · Corregir · Volver |
+| buttons | Yes, light · Yes, medium · Yes, heavy · Yes, another day · Not yet · Light · Medium · Heavy · Same as yesterday · It stopped · It had stopped that day · I don't remember · Tell you more · Other: I'll write it · Done · Nothing special · Fix · Back | Sí, poco · Sí, normal · Sí, mucho · Sí, otro día · Todavía no · Poco · Normal · Mucho · Igual que ayer · Ya no sangro · Ese día ya no sangraba · No me acuerdo · Contarte más · Otro: escríbemelo · Listo · Nada especial · Corregir · Volver |
 | flows | none · unspecified · light · medium · heavy | sin sangrado · sangrado · poco · normal · mucho |
 | `pain` | pain {n} | dolor {n} |
 | symptoms | cramps · bloating · headache · lower back pain · pelvic pain · breast pain · nausea · diarrhea · constipation · fatigue · mood changes · acne · poor sleep · appetite changes · clots · spotting | calambres · hinchazón · dolor de cabeza · dolor lumbar · dolor pélvico · pecho dolorido · náuseas · diarrea · estreñimiento · cansancio · cambios de humor · granos · duermo mal · cambios de apetito · coágulos · manchado |
@@ -658,7 +741,9 @@ with the same `{placeholders}`; every Spanish string containing `?` also contain
 ## 8. Storage and git
 
 - `<data>` is a checkout of the household's private data repository. The bot is the **only writer of
-  `cycle/log.jsonl`**. People edit `profile.yaml` and the plugin and push.
+  `cycle/log.jsonl`**. People edit `profile.yaml` and the plugin and push; the bot also commits
+  `profile.yaml` when she changes a setting from the chat (5.5), always as its own `settings:`
+  commit.
 - A write is: take `DATA_LOCK`, load, apply, write a temp file, `os.replace`, release. The file on the
   volume is the truth as soon as the tap is answered. Button writes happen on the main thread and
   record blocks on the worker thread, so the lock is what keeps them apart.
@@ -669,7 +754,8 @@ with the same `{placeholders}`; every Spanish string containing `?` also contain
   cycle/log.jsonl`, `commit -m "log: <dates>"`, `pull --rebase -X theirs`, `push`. A whole three-tap
   check-in becomes one commit. Commit messages carry dates only, never values.
 - When nothing is dirty, `flush()` pulls once an hour (`pull --rebase -X theirs --quiet`), so profile
-  and plugin edits arrive; the plugin reloads by mtime.
+  and plugin edits arrive; the plugin reloads by mtime, and a pull that changed `profile.yaml` sets
+  `repo.profile_pulled`, so the bot reloads the profile on that tick (5.5).
 - **Conflicts resolve themselves.** In a rebase, `-X theirs` is the commit being replayed, that is the
   bot's; a conflicting hunk in `cycle/log.jsonl` resolves to the bot's line and non-conflicting human
   edits survive. After any pull that changed the file the bot reloads it and re-runs `derive_starts`;
@@ -744,7 +830,9 @@ with the same `{placeholders}`; every Spanish string containing `?` also contain
 `sct check --data <dir>` validates `profile.yaml` and every log line and reports `cycle_start` flags
 that differ from the recomputation (exit 1 on errors). `sct predict --data <dir> [--today D]` prints the
 prediction. `sct say --data <dir> --ask` sends today's card marked «(prueba)» without touching
-`last_ask`: the positive control for a live deployment.
+`last_ask`: the positive control for a live deployment. `sct say --data <dir> --intro` posts the
+introduction (the text of `/presentacion`) to the configured group and exits, for the day the bot
+joins a group or its abilities change.
 
 ## 11. Privacy
 
@@ -782,10 +870,10 @@ prediction. `sct say --data <dir> --ask` sends today's card marked «(prueba)» 
 | file | covers |
 |---|---|
 | `test_records.py` | derive_starts reproduces the fictional log's flags; the gap rule at exactly 10 vs 11 days; `none` and `spotting` never start a cycle; replace-field semantics; delete; untouched lines byte-identical; validate_block refuses a future date, a date older than 90 days, pain 11, an unknown flow, an unknown symptom, an unknown key, 15 days, each with a reason code that does not contain the value; a Change with before == after is empty |
-| `test_cycle.py` | lengths outside 20..45 dropped; median and window; fewer than 3 lengths; period length; `bot_day` at 04:59 vs 05:01; DST days 2026-03-29 and 2026-10-25; each phase kind with its exit; day 8 is `period` only while days are missing |
+| `test_cycle.py` | `period_max_day` moves the last daily ask and the catch-up day; lengths outside 20..45 dropped; median and window; fewer than 3 lengths; period length; `bot_day` at 04:59 vs 05:01; DST days 2026-03-29 and 2026-10-25; each phase kind with its exit; day 8 is `period` only while days are missing |
 | `test_schedule.py` | quiet before the window; the ask at `ask_at`, not before, not twice, not after `ask_at + 2 h`; `ask_at` 23:00 with ticks at 22:59, 23:00, 00:30 and 01:00 the next day (no, yes, yes, no); skipped when today has a flow; a restart on the same day asks no second time; late asks daily; a 60-day frozen run counts the messages (at most one scheduled per bot day); missing days older than 3 never asked; the day-8 catch-up card once, with the catch-up wording, and nothing on day 8 when nothing is missing |
-| `test_bot.py` | the three-tap flow edits one message; a stale keyboard works by date; a callback dated 91 days back gets the toast and writes nothing; «Igual que ayer»; the picker; «Ya no sangro» closes and posts the closing line; a close undone and redone posts it again; day 7 line; pain 9 sends `pain_high` once, 9 again does not, 3 then 9 does; «Contarte más» sends selective force_reply with the mention; a reply triggers a turn with the turn shape of section 6; a message mentioning the bot does too; the record is written and the confirmation is built from the Change; a block whose days are unchanged posts no «Anotado:»; a future-dated block writes nothing; plugin raises, the keyboard comes and the line stays pending; `kept: false` posts `ai_down`, writes nothing, and the resend yields exactly one answer; 20 queued lines are capped to 10 and the next turn succeeds; `/nuevo` clears pending lines; a message arriving mid-turn is not dropped; an answer ending in "?" carries force_reply; plain group text from her ignored with privacy on, answered with privacy off, an admin's plain text ignored in both; a stranger's tap gets the toast; `/anotar ayer mucho 6 calambres`; `/estado` admin-only and every phase kind renders through a locale key; migration; a voice note with no mention is heard, echoed under the note and sent as `[voice note]`; an audio file and an admin's note in private; strangers' and other chats' notes ignored; `voice_off` (no plugin, no `transcribe`, `NotImplementedError`), `voice_failed` (plugin, empty text, download, `getFile`) and `voice_too_long` (on arrival and from `getFile`); a heard note is never heard twice; the echo is escaped and cut; a bot that is a group admin reads her plain text; `later` posts after the answer, fails with `later_failed`, says nothing when empty, runs one job at a time in order without holding turns, and never runs for a turn not kept |
-| `test_repo.py` | one commit after 60 s quiet for three taps; flush on SIGTERM; the human clone pushes a profile edit between the bot's commit and push, the bot rebases and both land; the human clone changes a line of `log.jsonl` the bot also changed: the pull completes, the bot's line wins, the human's other edits survive, the push lands; the remote refuses the push (a hook that exits 1): the commit stays, `/estado` counts it, the next flush pushes after the hook is removed (positive control); `/deshacer` on a dirty file restores HEAD with no commit, on a clean `log:` HEAD makes an `undo:` commit, and on an `undo:` HEAD says nothing to undo; commit messages contain no flow or symptom words; the token never appears in `git config` |
+| `test_bot.py` | the three-tap flow edits one message; a start from the card asks about the day before, a toggle there writes a symptom-only day and leaves the start alone, and the step is skipped when that day already says something or the day is not a start; the eve toggles follow what she logs there most; `/resumen` tells the day-before pattern from three starts on; `period_max_day` from the profile moves the last daily ask; a `settings` block rewrites the profile by line, commits, pushes and takes effect, a refused one (each reason, and broken JSON) changes nothing; `/hora` needs no assistant and the next tick asks at the new hour; a profile pulled from the remote is reloaded and a bad one refused; `set_profile_lines` keeps every other byte; `/estado` shows the ask hour; a stale keyboard works by date; a callback dated 91 days back gets the toast and writes nothing; «Igual que ayer»; the picker; «Ya no sangro» closes and posts the closing line; a close undone and redone posts it again; day 7 line; pain 9 sends `pain_high` once, 9 again does not, 3 then 9 does; «Contarte más» sends selective force_reply with the mention; a reply triggers a turn with the turn shape of section 6; a message mentioning the bot does too; the record is written and the confirmation is built from the Change; a block whose days are unchanged posts no «Anotado:»; a future-dated block writes nothing; plugin raises, the keyboard comes and the line stays pending; `kept: false` posts `ai_down`, writes nothing, and the resend yields exactly one answer; 20 queued lines are capped to 10 and the next turn succeeds; `/nuevo` clears pending lines; a message arriving mid-turn is not dropped; an answer ending in "?" carries force_reply; plain group text from her ignored with privacy on, answered with privacy off, an admin's plain text ignored in both; a stranger's tap gets the toast; `/anotar ayer mucho 6 calambres`; `/estado` admin-only and every phase kind renders through a locale key; migration; a voice note with no mention is heard, echoed under the note and sent as `[voice note]`; an audio file and an admin's note in private; strangers' and other chats' notes ignored; `voice_off` (no plugin, no `transcribe`, `NotImplementedError`), `voice_failed` (plugin, empty text, download, `getFile`) and `voice_too_long` (on arrival and from `getFile`); a heard note is never heard twice; the echo is escaped and cut; a bot that is a group admin reads her plain text; `later` posts after the answer, fails with `later_failed`, says nothing when empty, runs one job at a time in order without holding turns, and never runs for a turn not kept |
+| `test_repo.py` | one commit after 60 s quiet for three taps; flush on SIGTERM; the human clone pushes a profile edit between the bot's commit and push, the bot rebases and both land; the human clone changes a line of `log.jsonl` the bot also changed: the pull completes, the bot's line wins, the human's other edits survive, the push lands; the remote refuses the push (a hook that exits 1): the commit stays, `/estado` counts it, the next flush pushes after the hook is removed (positive control); `/deshacer` on a dirty file restores HEAD with no commit, on a clean `log:` HEAD makes an `undo:` commit, and on an `undo:` HEAD says nothing to undo; a pull that changes the profile raises the reload flag and one that changes only the log does not; `write_profile` commits the profile alone (a dirty log stays out), `flush` pushes it, and a refused or failed commit leaves the file and the index as they were (a pre-commit hook that exits 1, then removed as the positive control); commit messages contain no flow or symptom words; the token never appears in `git config` |
 | `test_applehealth.py` | a fictional export in a zip with a localised member name and a `_cda.xml` beside it; the three value forms; metadata child counted; `NotPresent` skipped; heaviest of a day; `IntermenstrualBleeding` to `spotting`; a `startDate` at 23:30 +0000 lands on the next day in the profile timezone; chat days never overwritten; a rerun is a no-op; `--dry-run` writes nothing |
 | `test_i18n.py`, `test_privacy.py` | sections 7 and 11 |
 
@@ -796,7 +884,7 @@ Each CI gate (ruff, pytest) is shown failing once on a mutated line before it is
 ```
 supercycletracker/
   __init__.py        __version__
-  cli.py             sct run | check | predict | import-apple-health | say
+  cli.py             sct run | check | predict | import-apple-health | say --ask | say --intro
   records.py         FLOWS, SYMPTOMS, load/save, derive_starts, validate_block, apply -> Change
   cycle.py           bot_day, predict, phase, queue; pure, today passed in
   i18n.py            Translator; locales/en.yaml, locales/es.yaml
@@ -853,7 +941,8 @@ name: Lucía
 birth_date: 1993-05-02
 timezone: Europe/Madrid
 language: es
-ask_at: "21:00"
+ask_at: "21:00"             # she can change it from the chat (5.5)
+period_max_day: 7           # optional, 3..14: the last period day the bot asks about daily
 telegram:
   chat_id: -100123          # the group
   user_id: 111              # whose cycle this is
