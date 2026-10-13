@@ -1,0 +1,152 @@
+# Spanish strings (keys from en.yaml). Every «?» goes with its «¿» and every «!» with its «¡».
+
+# --- the scheduled ask and the card steps ------------------------------------------------
+ask_waiting: "{m}, por tus últimos ciclos la regla podría llegarte estos días. ¿Te ha bajado ya?"
+ask_late: "{m}, ¿alguna novedad? Cuando te baje, me lo dices con un toque."
+ask_period: "{m}, día {n} de la regla. ¿Cómo va hoy?"
+ask_gap_one: "{m}, ayer se nos pasó. ¿Cómo fue el {date}?"
+ask_gap_many: "{m}, se nos pasaron unos días. Vamos uno a uno: ¿cómo fue el {date}?"
+ask_catchup: "{m}, para cerrar esta regla me falta el {date}. ¿Te acuerdas más o menos de cómo fue?"
+ask_pain: "{done} ¿Y el dolor? 0 es nada y 10, el peor que conoces."
+ask_symptoms: "{done} ¿Algo más? Marca lo que notes y pulsa «Listo»."
+card_done: "Hecho: {date}, día {n}. {summary}"
+next_today: "Anotado el {date}. Ahora, ¿cómo va hoy, {next}?"
+next_gap: "Anotado el {date}. Ahora, ¿cómo fue el {next}?"
+tomorrow: "Mañana a las {time} te vuelvo a preguntar."
+not_yet: "Vale. Mañana te vuelvo a preguntar."
+skipped: "No pasa nada, dejo el {date} en blanco."
+pick_day: "¿Qué día te bajó?"
+closed: "Cierro esta regla: {days} días, del {start} al {end}. La próxima, hacia el {expected} (entre el {ws} y el {we}). Hasta entonces no te molesto."
+day7: "Llevamos 7 días, así que dejo de preguntarte cada día. Si sigue, cuéntamelo con /hoy cuando quieras; si dura bastante más de lo habitual, merece la pena comentarlo con tu médico."
+tell_me: "{m}, cuéntame. Te leo."
+placeholder: "Ej.: poco, dolor 3, hinchada"
+
+# --- what was recorded ---------------------------------------------------------------------
+recorded: "Anotado:"
+line_new: "• {date}: {summary}"
+line_changed: "• {date}: {before} → {after}"
+line_closed: "• {date}: sin sangrado (cierro esta regla)"
+line_deleted: "• {date}: borrado"
+invalid_block: "No he sabido anotarlo bien, así que no he guardado nada. ¿Me lo dices con los botones?"
+ai_down: "Ahora mismo no puedo leer mensajes escritos. Puedes anotarlo con los botones y, si me lo vuelves a escribir más tarde, lo leo."
+no_ai: "Sin el asistente no entiendo mensajes escritos. Puedes anotarlo con los botones:"
+pain_high: "Un dolor de {n} es mucho. Si no se te pasa con lo que sueles tomar, o te pasa a menudo, merece la pena comentarlo con tu médico."
+only_her: "Esto es solo para {name}."
+toast_saved: "Apuntado: {what}"
+undo_done: "Deshecho: {what}."
+undo_none: "No hay nada que deshacer."
+
+# --- /resumen ------------------------------------------------------------------------------
+summary_title: "Tu ciclo, {name}:"
+summary_last: "• Última regla: {start}, {days} día(s) apuntado(s)."
+summary_lengths: "• Ciclos recientes: {lengths} días (lo normal en ti: {median})."
+summary_period: "• Duración habitual: {days} días."
+summary_next: "• Próxima: hacia el {expected} (entre el {ws} y el {we})."
+summary_symptoms: "• Lo que más anotas: {items}."
+summary_empty: "Aún no tengo datos suficientes."
+
+# --- /estado -------------------------------------------------------------------------------
+status: "Fase: {phase}. Hoy: {asked}. Asistente: {ai}. Datos: {git}."
+phase_no_history: "sin historial"
+phase_quiet: "tranquila hasta el {ws}"
+phase_waiting: "esperando (del {ws} al {we})"
+phase_late: "con retraso desde el {we}"
+phase_period: "regla, día {n}"
+status_asked: "preguntado, sin respuesta"
+status_answered: "preguntado y respondido"
+status_not_asked: "aún no preguntado"
+status_ai_ok: "última respuesta hace {ago}"
+status_ai_never: "sin respuesta desde el arranque"
+status_ai_none: "sin asistente"
+status_git_ok: "sincronizado"
+status_git_unpushed: "{n} commit(s) sin subir"
+status_git_down: "remoto inaccesible al arrancar"
+
+# --- commands ------------------------------------------------------------------------------
+anotar_usage: "Uso: /anotar &lt;cuándo&gt; &lt;cuánto&gt; [dolor 0-10] [síntomas…]. Ejemplo: /anotar ayer mucho 6 calambres"
+anotar_saved: "Anotado sin el asistente: {summary}. Si no es así, /deshacer."
+new_conversation: "Empiezo una conversación nueva. Lo apuntado sigue igual."
+help: |-
+  Esto es lo que entiendo:
+  /hoy: la pregunta de hoy; con texto detrás, me lo cuentas
+  /resumen: tu ciclo en pocas líneas
+  /anotar ayer mucho 6 calambres: anotar un día sin el asistente
+  /deshacer: deshacer lo último que anoté
+  /ayuda: esta lista
+  También puedes responder a cualquiera de mis mensajes.
+help_admin: |-
+  Para administradores:
+  /estado: cómo va el bot
+  /nuevo: empezar una conversación nueva con el asistente
+  /presentacion: publicar la presentación
+intro: |-
+  Hola. Llevo la cuenta del ciclo de {name} en este grupo.
+  Los días en que la regla puede llegarle, le pregunto por la noche con botones: basta con un toque.
+  También puede responder a cualquiera de mis mensajes con sus palabras, y lo anoto.
+  Puede preguntarme dudas sobre su ciclo; le contesto teniendo en cuenta su propio historial.
+  Lo que anoto se guarda en un repositorio privado de esta casa. Para entender lo que escribe y contestar sus dudas, un asistente de IA lee sus mensajes y su historial.
+  /ayuda tiene la lista de lo que entiendo.
+
+# --- buttons -------------------------------------------------------------------------------
+btn_yes_light: "Sí, poco"
+btn_yes_medium: "Sí, normal"
+btn_yes_heavy: "Sí, mucho"
+btn_yes_other: "Sí, otro día"
+btn_not_yet: "Todavía no"
+btn_light: "Poco"
+btn_medium: "Normal"
+btn_heavy: "Mucho"
+btn_same: "Igual que ayer"
+btn_stopped: "Ya no sangro"
+btn_stopped_then: "Ese día ya no sangraba"
+btn_dont_remember: "No me acuerdo"
+btn_tell_more: "Contarte más"
+btn_other: "Otro: escríbemelo"
+btn_done: "Listo"
+btn_fix: "Corregir"
+btn_back: "Volver"
+
+# --- labels --------------------------------------------------------------------------------
+flows:
+  none: "sin sangrado"
+  unspecified: "sangrado"
+  light: "poco"
+  medium: "normal"
+  heavy: "mucho"
+pain: "dolor {n}"
+symptoms:
+  abdominal_cramps: "calambres"
+  bloating: "hinchazón"
+  headache: "dolor de cabeza"
+  lower_back_pain: "dolor lumbar"
+  pelvic_pain: "dolor pélvico"
+  breast_pain: "pecho dolorido"
+  nausea: "náuseas"
+  diarrhea: "diarrea"
+  constipation: "estreñimiento"
+  fatigue: "cansancio"
+  mood_changes: "cambios de humor"
+  acne: "granos"
+  sleep_changes: "duermo mal"
+  appetite_changes: "cambios de apetito"
+  clots: "coágulos"
+  spotting: "manchado"
+
+# --- dates ---------------------------------------------------------------------------------
+days: [lunes, martes, miércoles, jueves, viernes, sábado, domingo]
+days_short: [lun, mar, mié, jue, vie, sáb, dom]
+months: [enero, febrero, marzo, abril, mayo, junio, julio, agosto, septiembre, octubre, noviembre, diciembre]
+date_long: "{weekday} {day} de {month}"
+date_short: "{day} de {month}"
+date_pick: "{weekday} {day}"
+
+# --- words /anotar understands -------------------------------------------------------------
+words_flow:
+  none: [nada]
+  light: [poco, poquito]
+  medium: [normal]
+  heavy: [mucho]
+words_when:
+  today: [hoy]
+  yesterday: [ayer]
+  day_before: [anteayer]

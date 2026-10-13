@@ -1,0 +1,548 @@
+import logging
+import os
+import stat
+import subprocess
+import threading
+from dataclasses import replace
+from datetime import date
+
+import pytest
+from conftest import git
+
+from supercycletracker import records
+from supercycletracker.records import Edit
+from supercycletracker.repo import BOT_EMAIL, DATA_LOCK, KV, LOG_FILE, Repo, git_env
+
+DAY = date(2027, 3, 4)
+TOKEN = "tok-0123456789-not-a-real-one"
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
+def tap(repo: Repo, d: date = DAY, source: str = "telegram", **fields):
+    return repo.write(lambda log: records.apply(log, Edit(days={d: fields}), source))
+
+
+def subject(path, rev="HEAD") -> str:
+    return git(path, "log", "-1", "--format=%s", rev).strip()
+
+
+def human_edit(dr, fn, message="edit by hand"):
+    """A person changes the log in their own clone and pushes."""
+    git(dr.human, "pull", "--quiet")
+    path = dr.human / LOG_FILE
+    log = records.load(path)
+    records.save(path, fn(log))
+    git(dr.human, "commit", "--quiet", "-am", message)
+    git(dr.human, "push", "--quiet")
+
+
+def human_profile(dr, text):
+    git(dr.human, "pull", "--quiet")
+    (dr.human / "cycle" / "profile.yaml").write_text(text, encoding="utf-8")
+    git(dr.human, "commit", "--quiet", "-am", "profile")
+    git(dr.human, "push", "--quiet")
+
+
+def human_raw(dr, text, message="edit by hand"):
+    """A person replaces the log's text as is, valid or not, and pushes."""
+    git(dr.human, "pull", "--quiet")
+    (dr.human / LOG_FILE).write_text(text, encoding="utf-8")
+    git(dr.human, "commit", "--quiet", "-am", message)
+    git(dr.human, "push", "--quiet")
+
+
+def rebasing(path) -> bool:
+    return "rebase in progress" in git(path, "status")
+
+
+# --- commit and push -----------------------------------------------------------------------
+
+
+def test_three_taps_become_one_commit_after_60s_of_quiet(data_repo):
+    dr, clock = data_repo, Clock()
+    repo, n0 = Repo(dr.data, clock=clock), data_repo.remote_count()
+    assert tap(repo, flow="medium")
+    clock.advance(10)
+    assert tap(repo, pain=4)
+    clock.advance(10)
+    assert tap(repo, symptoms=["headache"])
+    clock.advance(59)
+    assert repo.flush() == "waiting"
+    assert dr.remote_count() == n0
+    clock.advance(1)
+    assert repo.flush() == "pushed"
+    assert dr.remote_count() == n0 + 1
+    assert subject(dr.remote, "main") == "log: 2027-03-04"
+    assert git(dr.remote, "log", "-1", "--format=%ae", "main").strip() == BOT_EMAIL
+    assert dr.remote_file(LOG_FILE) == dr.log.read_text(encoding="utf-8")
+    assert repo.flush() == "idle"
+
+
+def test_a_tap_that_changes_nothing_writes_nothing(data_repo):
+    repo = Repo(data_repo.data, clock=Clock())
+    tap(repo, flow="medium")
+    assert repo.flush(force=True) == "pushed"
+    assert not tap(repo, flow="medium")
+    assert git(data_repo.data, "status", "--porcelain") == ""
+
+
+def test_write_rederives_starts_whatever_fn_returns(data_repo):
+    repo = Repo(data_repo.data, clock=Clock())
+    stale_day = date(2027, 2, 1)
+
+    def stale(log):  # a Change built by hand, with one start flag dropped
+        after = dict(log)
+        after[stale_day] = replace(after[stale_day], cycle_start=False)
+        return records.Change(before=log, after=after, items=())
+
+    change = repo.write(stale)
+    assert change.after[stale_day].cycle_start
+    assert records.load(data_repo.log)[stale_day].cycle_start
+    assert git(data_repo.data, "status", "--porcelain") == ""  # nothing really changed
+
+
+def test_sigterm_flush_commits_at_once(data_repo):
+    repo, n0 = Repo(data_repo.data, clock=Clock()), data_repo.remote_count()
+    tap(repo, flow="light")
+    assert repo.flush(force=True) == "pushed"
+    assert data_repo.remote_count() == n0 + 1
+
+
+def test_a_profile_pushed_between_commit_and_push_is_rebased_over(data_repo):
+    dr, clock = data_repo, Clock()
+    repo, n0 = Repo(dr.data, clock=clock), dr.remote_count()
+    tap(repo, flow="heavy")
+    human_profile(dr, "name: Example\nlanguage: en\n")
+    clock.advance(61)
+    assert repo.flush() == "pushed"
+    assert dr.remote_count() == n0 + 2
+    assert git(dr.remote, "rev-list", "--merges", "--count", "main").strip() == "0"
+    assert dr.remote_file("cycle/profile.yaml") == "name: Example\nlanguage: en\n"
+    assert '"date": "2027-03-04", "flow": "heavy"' in dr.remote_file(LOG_FILE)
+    assert (dr.data / "cycle" / "profile.yaml").read_text() == "name: Example\nlanguage: en\n"
+
+
+def test_a_conflicting_line_resolves_to_the_bots_and_other_edits_survive(data_repo):
+    dr, clock = data_repo, Clock()
+    repo = Repo(dr.data, clock=clock)
+    first, far = date(2027, 1, 4), date(2027, 2, 5)
+    tap(repo, d=first, pain=5)
+
+    def by_hand(log):
+        log = dict(log)
+        log[first] = records.Day(**{**log[first].__dict__, "pain": 2})
+        log[far] = records.Day(**{**log[far].__dict__, "note": "edited by hand"})
+        return log
+
+    human_edit(dr, by_hand)
+    clock.advance(61)
+    assert repo.flush() == "pushed"
+    remote = records.loads(dr.remote_file(LOG_FILE))
+    assert remote[first].pain == 5  # the bot's line
+    assert remote[far].note == "edited by hand"  # the person's other edit
+    assert dr.log.read_text(encoding="utf-8") == dr.remote_file(LOG_FILE)
+    assert repo.unpushed() == 0
+
+
+def test_a_persons_edit_to_the_next_day_is_in_the_bots_hunk_and_goes(data_repo):
+    """git resolves `-X theirs` by hunk: adjacent lines are one hunk, so the bot's side wins for
+    the person's edit on the neighbouring day too. Deliberate: the bot is the log's only writer
+    by rule, and the hand edit is still in the remote's history."""
+    dr, clock = data_repo, Clock()
+    repo = Repo(dr.data, clock=clock)
+    first, second = date(2027, 1, 4), date(2027, 1, 5)
+    tap(repo, d=first, pain=5)
+
+    def by_hand(log):
+        return {**log, second: replace(log[second], pain=2)}
+
+    human_edit(dr, by_hand)
+    clock.advance(61)
+    assert repo.flush() == "pushed"
+    remote = records.loads(dr.remote_file(LOG_FILE))
+    assert remote[first].pain == 5
+    assert remote[second].pain is None
+
+
+def test_the_bots_commit_holds_the_log_only(data_repo):
+    dr = data_repo
+    repo = Repo(dr.data, clock=Clock())
+    profile = dr.data / "cycle" / "profile.yaml"
+    profile.write_text("name: Example\nlanguage: en\n", encoding="utf-8")
+    git(dr.data, "add", "cycle/profile.yaml")  # a person left a change staged in the checkout
+    tap(repo, flow="medium")
+    assert repo.flush(force=True) == "pushed"
+    assert git(dr.data, "show", "--name-only", "--format=", "HEAD").split() == [LOG_FILE]
+    assert "language: es" in dr.remote_file("cycle/profile.yaml")
+    assert profile.read_text() == "name: Example\nlanguage: en\n"  # their edit is still there
+
+
+def test_a_persons_uncommitted_edit_in_the_checkout_survives_the_pull(data_repo):
+    """`--autostash`: without it the pull refuses a dirty tracked file and every flush fails."""
+    dr = data_repo
+    repo = Repo(dr.data, clock=Clock())
+    (dr.data / "cycle" / "profile.yaml").write_text("name: Example\nlanguage: en\n")
+    (dr.human / "README.md").write_text("notes\n")  # meanwhile the remote moves on
+    git(dr.human, "add", "README.md")
+    git(dr.human, "commit", "--quiet", "-m", "readme")
+    git(dr.human, "push", "--quiet")
+    tap(repo, flow="medium")
+    assert repo.flush(force=True) == "pushed"
+    assert dr.remote_file("README.md") == "notes\n"
+    assert (dr.data / "cycle" / "profile.yaml").read_text() == "name: Example\nlanguage: en\n"
+
+
+def test_a_deleted_log_on_the_remote_fails_as_a_conflict_and_keeps_the_commit(data_repo):
+    """modify/delete is a conflict `-X theirs` cannot settle: the rebase is aborted, the bot's
+    commit stays, and every try reports `pull_conflict` until a person restores the file."""
+    dr, clock = data_repo, Clock()
+    repo = Repo(dr.data, clock=clock)
+    tap(repo, flow="heavy")
+    git(dr.human, "pull", "--quiet")
+    git(dr.human, "rm", "--quiet", LOG_FILE)
+    git(dr.human, "commit", "--quiet", "-m", "remove the log")
+    git(dr.human, "push", "--quiet")
+
+    assert repo.flush(force=True) == "failed"
+    assert repo.last_error == "pull_conflict"
+    assert not rebasing(dr.data)
+    assert repo.unpushed() == 1
+    assert subject(dr.data) == "log: 2027-03-04"
+    assert records.load(dr.log)[DAY].flow == "heavy"
+    clock.advance(61)
+    assert repo.flush() == "failed" and repo.last_error == "pull_conflict"  # stays visible
+
+
+def test_a_pull_killed_by_the_timeout_is_aborted(data_repo, monkeypatch):
+    dr = data_repo
+    repo = Repo(dr.data, clock=Clock())
+    tap(repo, flow="heavy")
+    git(dr.human, "pull", "--quiet")
+    git(dr.human, "rm", "--quiet", LOG_FILE)
+    git(dr.human, "commit", "--quiet", "-m", "remove the log")
+    git(dr.human, "push", "--quiet")
+    real = repo._git
+
+    def slow_pull(*args):
+        r = real(*args)
+        if args[0] == "pull":  # the pull ran and stopped mid-rebase, then the timeout hit
+            assert rebasing(dr.data)
+            raise subprocess.TimeoutExpired(["git", "pull"], 60)
+        return r
+
+    monkeypatch.setattr(repo, "_git", slow_pull)
+    assert repo.flush(force=True) == "failed"
+    assert repo.last_error == "TimeoutExpired"
+    assert not rebasing(dr.data)
+    assert repo.unpushed() == 1
+
+
+def test_a_conflict_probe_killed_by_the_timeout_still_aborts_the_rebase(data_repo, monkeypatch):
+    dr = data_repo
+    repo = Repo(dr.data, clock=Clock())
+    tap(repo, flow="heavy")
+    git(dr.human, "pull", "--quiet")
+    git(dr.human, "rm", "--quiet", LOG_FILE)
+    git(dr.human, "commit", "--quiet", "-m", "remove the log")
+    git(dr.human, "push", "--quiet")
+    real = repo._git
+
+    def slow_probe(*args):
+        if args[0] == "diff":  # the pull failed mid-rebase, then the probe hit the timeout
+            assert rebasing(dr.data)
+            raise subprocess.TimeoutExpired(["git", "diff"], 60)
+        return real(*args)
+
+    monkeypatch.setattr(repo, "_git", slow_probe)
+    assert repo.flush(force=True) == "failed"
+    assert repo.last_error == "TimeoutExpired"
+    assert not rebasing(dr.data)
+    assert repo.unpushed() == 1
+
+
+def test_starts_are_rederived_after_a_pull_that_changed_the_log(data_repo):
+    dr = data_repo
+    repo = Repo(dr.data, clock=Clock())
+    # By hand: a bleed day five days before the February start, with no flag on it and the
+    # February flag left in place, which the 10-day rule says is wrong.
+    path = dr.human / LOG_FILE
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    added = '{"date": "2027-01-27", "flow": "light", "source": "telegram"}\n'
+    at = next(i for i, line in enumerate(lines) if '"2027-02-01"' in line)
+    path.write_text("".join(lines[:at] + [added] + lines[at:]), encoding="utf-8")
+    git(dr.human, "commit", "--quiet", "-am", "add a day by hand")
+    git(dr.human, "push", "--quiet")
+
+    assert repo.flush() == "pulled"
+    log = records.load(dr.log)
+    assert log[date(2027, 1, 27)].cycle_start and not log[date(2027, 2, 1)].cycle_start
+    assert subject(dr.data) == "derive: 2027-01-27, 2027-02-01"  # committed in the pull
+    assert git(dr.data, "status", "--porcelain") == ""
+    assert repo.flush() == "pushed"
+    assert subject(dr.remote, "main") == "derive: 2027-01-27, 2027-02-01"
+    # A re-derive is not a check-in: /deshacer leaves it, and the flags, alone.
+    assert repo.undo() is None
+    assert records.derive_starts(records.load(dr.log)) == records.load(dr.log)
+
+
+def test_a_malformed_line_pulled_from_the_remote_is_logged_and_writes_refuse(data_repo, caplog):
+    dr, clock = data_repo, Clock()
+    repo = Repo(dr.data, clock=clock)
+    good = dr.log.read_text(encoding="utf-8")
+    planted = '{"date": "2027-03-09", "flow": "plantedword", "source": "admin"}\n'
+    for bad, code in (("5\n", "bad_line"), (planted, "unknown_flow"), ("{not json}\n", "bad_json")):
+        human_raw(dr, good + bad)
+        caplog.clear()
+        clock.advance(3600)
+        with caplog.at_level(logging.DEBUG):
+            assert repo.flush() == "pulled"
+        assert code in caplog.text and "plantedword" not in caplog.text
+        with pytest.raises(ValueError, match=f"^{code}$"):
+            tap(repo, flow="light")
+        assert repo.undo() is None  # HEAD is the person's commit
+        human_raw(dr, good, "fix by hand")
+        clock.advance(59)
+        assert repo.flush() == "idle"
+        clock.advance(1)  # while the log is unreadable, the next pull is a minute away
+        assert repo.flush() == "pulled"
+    assert tap(repo, flow="light")  # fixed on the remote, the bot writes again
+
+
+def test_pulls_once_an_hour_when_clean(data_repo):
+    dr, clock = data_repo, Clock()
+    repo = Repo(dr.data, clock=clock)
+    profile = dr.data / "cycle" / "profile.yaml"
+    assert repo.flush() == "pulled"
+    human_profile(dr, "name: Example\nlanguage: en\n")
+    clock.advance(600)
+    assert repo.flush() == "idle"
+    assert "language: es" in profile.read_text()
+    clock.advance(3000)
+    assert repo.flush() == "pulled"
+    assert "language: en" in profile.read_text()
+
+
+def test_a_refused_push_keeps_the_commit_and_the_next_flush_pushes_it(data_repo):
+    dr, clock = data_repo, Clock()
+    repo, n0 = Repo(dr.data, clock=clock), dr.remote_count()
+    hook = dr.remote / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+
+    tap(repo, flow="medium")
+    assert repo.flush(force=True) == "failed"
+    assert repo.last_error == "push_failed"
+    assert repo.unpushed() == 1  # what /estado counts
+    assert dr.remote_count() == n0
+    assert subject(dr.data) == "log: 2027-03-04"
+    assert repo.flush() == "backoff"
+
+    hook.unlink()
+    clock.advance(61)
+    assert repo.flush() == "pushed"
+    assert repo.unpushed() == 0
+    assert dr.remote_count() == n0 + 1
+    assert repo.last_error is None
+
+
+def test_data_lock_is_held_for_every_git_call_of_a_flush(data_repo, monkeypatch):
+    repo = Repo(data_repo.data, clock=Clock())
+    seen: list[bool] = []
+    real = repo._git
+
+    def free() -> bool:
+        out = []
+
+        def probe():
+            got = DATA_LOCK.acquire(blocking=False)
+            if got:
+                DATA_LOCK.release()
+            out.append(got)
+
+        t = threading.Thread(target=probe)
+        t.start()
+        t.join()
+        return out[0]
+
+    def watched(*args):
+        seen.append(free())
+        return real(*args)
+
+    assert free()  # positive control: outside a flush another thread gets the lock
+    monkeypatch.setattr(repo, "_git", watched)
+    tap(repo, flow="light")
+    assert repo.flush(force=True) == "pushed"
+    assert len(seen) >= 5 and not any(seen)
+
+
+# --- undo ----------------------------------------------------------------------------------
+
+
+def test_undo_while_dirty_restores_head_and_commits_nothing(data_repo):
+    dr = data_repo
+    repo, head = Repo(dr.data, clock=Clock()), git(dr.data, "rev-parse", "HEAD")
+    tap(repo, flow="medium")
+    tap(repo, d=date(2027, 3, 3), pain=6)
+    change = repo.undo()
+    assert change.dates == (date(2027, 3, 3), DAY)
+    assert change.items[1][1] is not None and change.items[1][2] is None
+    assert git(dr.data, "status", "--porcelain") == ""
+    assert git(dr.data, "rev-parse", "HEAD") == head
+
+
+def test_undo_on_a_clean_log_commit_makes_an_undo_commit(data_repo):
+    dr = data_repo
+    repo = Repo(dr.data, clock=Clock())
+    seed = dr.log.read_text(encoding="utf-8")
+    tap(repo, flow="medium", pain=3)
+    assert repo.flush(force=True) == "pushed"
+    change = repo.undo()
+    assert change.dates == (DAY,)
+    assert subject(dr.data) == "undo: 2027-03-04"
+    assert dr.log.read_text(encoding="utf-8") == seed
+    assert repo.flush(force=True) == "pushed"
+    assert subject(dr.remote, "main") == "undo: 2027-03-04"
+
+
+def test_undo_on_an_undo_or_a_persons_commit_has_nothing_to_undo(data_repo):
+    dr = data_repo
+    repo = Repo(dr.data, clock=Clock())
+    assert repo.undo() is None  # HEAD is the seed, a person's commit
+    tap(repo, flow="medium")
+    repo.flush(force=True)
+    assert repo.undo()
+    assert repo.undo() is None  # HEAD is `undo:`
+    assert subject(dr.data) == "undo: 2027-03-04"
+
+
+def test_commit_messages_carry_dates_only(data_repo):
+    dr = data_repo
+    repo = Repo(dr.data, clock=Clock())
+    tap(repo, flow="heavy", pain=7, symptoms=["abdominal_cramps", "nausea"], note="planted note")
+    repo.flush(force=True)
+    repo.undo()
+    repo.flush(force=True)
+    messages = git(dr.remote, "log", "--format=%B", "main")
+    assert "log: 2027-03-04" in messages and "undo: 2027-03-04" in messages  # control
+    for word in (*records.FLOWS, *records.SYMPTOMS, "pain", "planted"):
+        assert word not in messages
+
+
+# --- token and remote ----------------------------------------------------------------------
+
+
+def test_the_token_never_lands_in_git_config(data_repo):
+    dr = data_repo
+    repo = Repo(dr.data, token=TOKEN, clock=Clock())
+    tap(repo, flow="light")
+    assert repo.flush(force=True) == "pushed"
+    assert repo.check_remote()
+    assert TOKEN not in (dr.data / ".git" / "config").read_text()
+    assert TOKEN not in git(dr.data, "config", "--list")
+    # Positive control: the environment git_env builds really carries the header to git.
+    header = subprocess.run(
+        ["git", "-C", str(dr.data), "config", "--get", "http.extraHeader"],
+        env=git_env(TOKEN),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert header.stdout.strip() == f"Authorization: token {TOKEN}"
+
+
+def test_the_token_is_never_on_a_git_command_line(data_repo, monkeypatch):
+    calls = []
+    real = subprocess.run
+
+    def spy(argv, **kw):
+        calls.append((argv, kw.get("env") or {}))
+        return real(argv, **kw)
+
+    repo = Repo(data_repo.data, token=TOKEN, clock=Clock())
+    tap(repo, flow="light")
+    monkeypatch.setattr(subprocess, "run", spy)
+    assert repo.check_remote()
+    assert repo.flush(force=True) == "pushed"
+    monkeypatch.undo()
+    assert len(calls) >= 5
+    for argv, env in calls:
+        assert not any(TOKEN in arg for arg in argv), argv
+        assert f"Authorization: token {TOKEN}" in env.values()
+
+
+def test_git_env_appends_to_existing_config_entries(monkeypatch):
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.quotePath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "false")
+    env = git_env(TOKEN)
+    assert env["GIT_CONFIG_COUNT"] == "2"
+    assert env["GIT_CONFIG_KEY_0"] == "core.quotePath"
+    assert env["GIT_CONFIG_KEY_1"] == "http.extraHeader"
+    assert git_env("")["GIT_CONFIG_COUNT"] == "1"  # no token, no header
+
+
+def test_check_remote_reports_an_unreachable_remote(data_repo, tmp_path):
+    repo = Repo(data_repo.data, clock=Clock())
+    assert repo.check_remote() is True
+    git(data_repo.data, "remote", "set-url", "origin", str(tmp_path / "nowhere.git"))
+    assert repo.check_remote() is False
+    assert repo.remote_ok is False
+
+
+# --- SQLite kv -----------------------------------------------------------------------------
+
+
+def test_kv_holds_only_its_keys(tmp_path):
+    kv = KV(tmp_path / "state" / "sct.sqlite")
+    for key in ("offset", "last_ask", "migrated_chat", "conv:-1", "pending:-1", "skip:2027-01-01"):
+        kv.set(key, "1")
+        assert kv.get(key) == "1"
+    for key in ("phase", "cycle", "convx", "pending"):
+        with pytest.raises(ValueError, match="unknown_kv_key"):
+            kv.set(key, "1")
+    assert kv.keys("skip:") == ["skip:2027-01-01"]
+    kv.delete("offset")
+    assert kv.get("offset") is None
+    assert kv.get("offset", "0") == "0"
+
+
+def test_kv_json_and_update(tmp_path):
+    kv = KV(tmp_path / "sct.sqlite")
+    kv.set_json("pending:-5", [{"id": 1, "content": "ñ"}])
+    assert kv.get_json("pending:-5") == [{"id": 1, "content": "ñ"}]
+    assert kv.update_json("pending:-5", lambda v: [*v, {"id": 2}]) == [
+        {"id": 1, "content": "ñ"},
+        {"id": 2},
+    ]
+    assert kv.update_json("pending:-5", lambda v: None) is None
+    assert kv.get("pending:-5") is None
+    assert kv.get_json("conv:-5", "none") == "none"
+
+
+def test_kv_works_across_threads_and_is_private(tmp_path):
+    path = tmp_path / "state" / "sct.sqlite"
+    kv = KV(path)
+
+    def worker(n):
+        for i in range(50):
+            kv.update_json("pending:-1", lambda v, x=n * 100 + i: [*v, x], default=[])
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(kv.get_json("pending:-1")) == 200
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    kv.close()
+    assert KV(path).get_json("pending:-1")[0] is not None  # it persists

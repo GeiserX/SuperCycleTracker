@@ -83,6 +83,21 @@ def test_unknown_key_on_load_is_refused(tmp_path):
         ),
         (['{"date": "2027-01-02", "flow": "light"}'], "missing_key"),
         (['{"flow": "light", "source": "admin"}'], "missing_key"),
+        # a hand edit pulled from the remote: every malformed shape is a ValueError reason code
+        (["5"], "bad_line"),
+        (['["2027-01-02"]'], "bad_line"),
+        (["{not json}"], "bad_json"),
+        (['{"date": "2027-13-02", "source": "admin"}'], "bad_date"),
+        (['{"date": "2027-01-02", "source": 7}'], "bad_source"),
+        (['{"date": "2027-01-02", "flow": "banana", "source": "admin"}'], "unknown_flow"),
+        (['{"date": "2027-01-02", "pain": "x", "source": "admin"}'], "bad_pain"),
+        (['{"date": "2027-01-02", "pain": 11, "source": "admin"}'], "bad_pain"),
+        (['{"date": "2027-01-02", "pain": true, "source": "admin"}'], "bad_pain"),
+        (['{"date": "2027-01-02", "symptoms": 3, "source": "admin"}'], "bad_symptoms"),
+        (['{"date": "2027-01-02", "symptoms": ["acne", 4], "source": "admin"}'], "bad_symptoms"),
+        (['{"date": "2027-01-02", "symptoms": ["itchy"], "source": "admin"}'], "unknown_symptom"),
+        (['{"date": "2027-01-02", "note": 5, "source": "admin"}'], "bad_note"),
+        (['{"date": "2027-01-02", "cycle_start": "yes", "source": "admin"}'], "bad_cycle_start"),
     ],
 )
 def test_a_bad_line_on_load_raises_a_reason_code(tmp_path, lines, code):

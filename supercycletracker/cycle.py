@@ -25,6 +25,7 @@ MIN_RUN = 3  # a run of bleed days shorter than this is a partly logged period
 PERIOD_MAX_DAY = 7  # the bot asks daily up to day 7
 CATCHUP_DAY = 8  # on day 8 it asks only for the gaps, once
 MISSING_BACK = 3  # missing days older than this are never asked about
+KINDS = ("no_history", "quiet", "waiting", "late", "period")  # every Phase.kind
 
 
 def bot_day(now: datetime, tz: tzinfo | str) -> date:
@@ -52,6 +53,10 @@ class Phase:
     start: date | None  # the latest start on or before today
     missing: tuple[date, ...]  # period days the bot still wants, oldest first
     prediction: Prediction | None
+
+    def __post_init__(self):
+        if self.kind not in KINDS:  # a new kind needs its phase_ locale key: add it to KINDS
+            raise ValueError("unknown_phase_kind")
 
 
 def _upto(log: Mapping[date, Day], today: date) -> dict[date, Day]:
