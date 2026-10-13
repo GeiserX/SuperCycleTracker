@@ -1,0 +1,37 @@
+[project]
+name = "supercycletracker"
+dynamic = ["version"]
+description = "Menstrual cycle tracker that lives in a Telegram group: asks on the likely days, logs from buttons or a plain reply, predicts the next period and keeps every record in a private git repo"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "pyyaml==6.0.3",
+]
+
+[project.scripts]
+sct = "supercycletracker.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "supercycletracker/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["supercycletracker"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.17.0",
+]
