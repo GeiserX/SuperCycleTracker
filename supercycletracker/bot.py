@@ -16,18 +16,21 @@ import logging
 import re
 import threading
 import time
+import unicodedata
 from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from datetime import time as clock_time
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
 from supercycletracker import assistant, cycle, records
 from supercycletracker.i18n import Translator
 from supercycletracker.records import SYMPTOMS, BlockError, Change, Day, Edit, Log
-from supercycletracker.repo import DATA_LOCK, KV, STATE_DB, Repo
+from supercycletracker.repo import DATA_LOCK, KV, STATE_DB, GitError, Repo
 from supercycletracker.telegram import TelegramError, safe
 
 log = logging.getLogger("sct.bot")
@@ -49,6 +52,12 @@ PAIN_HIGH = 8  # a day crossing into this pain or more posts `pain_high`
 TEXT_MAX = 4096  # Telegram's limit on one message, in UTF-16 code units
 NOT_MODIFIED = "message is not modified"
 HER, ADMIN = "her", "admin"
+ASK_WINDOW = timedelta(hours=2)  # a bot that was down at ask_at still asks up to 2 h later
+ASK_EARLIEST = clock_time(5, 0)  # a bot day starts at 05:00, so ask_at must not be earlier
+POLL_S = 20  # getUpdates long poll
+WAIT_409_S = 30  # another poller holds the token: wait and keep the offset
+BACKOFF_MIN_S, BACKOFF_MAX_S = 5, 300  # 5xx and network failures
+MENU = ("hoy", "resumen", "anotar", "deshacer", "ayuda")  # the commands she sees in the menu
 
 _COMMAND = re.compile(r"^/([A-Za-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s+(.*))?$", re.DOTALL)
 _CALLBACK_DATE = re.compile(r"^\d{8}$")
@@ -108,6 +117,46 @@ class Profile:
 def load_profile(data: str | Path) -> Profile:
     path = Path(data) / PROFILE_FILE
     return Profile.from_dict(yaml.safe_load(path.read_text(encoding="utf-8")))
+
+
+def ask_time(value: str) -> clock_time:
+    """`ask_at` as a time. Raises `ValueError("bad_ask_at")` unless it is "HH:MM" within
+    05:00-23:59: a bot day ends at 05:00, so an earlier hour would ask about the day before."""
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", value.strip())
+    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+        raise ValueError("bad_ask_at")
+    at = clock_time(int(m.group(1)), int(m.group(2)))
+    if at < ASK_EARLIEST:
+        raise ValueError("bad_ask_at")
+    return at
+
+
+def profile_errors(p: Profile, data: str | Path) -> list[str]:
+    """What keeps the bot from running on this profile, as reason codes."""
+    errors = []
+    if not p.name:
+        errors.append("missing_name")
+    try:
+        ZoneInfo(p.timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        errors.append("bad_timezone")
+    try:
+        ask_time(p.ask_at)
+    except ValueError:
+        errors.append("bad_ask_at")
+    if p.chat_id is None:
+        errors.append("missing_chat_id")
+    if p.user_id is None:
+        errors.append("missing_user_id")
+    plugin = (p.assistant or {}).get("plugin")
+    if plugin:
+        root = Path(data).resolve()
+        path = (root / str(plugin)).resolve()
+        if root not in path.parents:
+            errors.append("plugin_outside_data")
+        elif not path.is_file():
+            errors.append("plugin_missing")
+    return errors
 
 
 def _int(value: object) -> int | None:
@@ -243,6 +292,11 @@ def _rows(buttons: list, size: int) -> list:
 # --- the bot -------------------------------------------------------------------------------
 
 
+class Interrupted(BaseException):
+    """Raised by the SIGTERM handler to cut a long poll short; never caught by `except
+    Exception`."""
+
+
 class Bot:
     def __init__(
         self,
@@ -252,6 +306,7 @@ class Bot:
         now: Callable[[], datetime] | None = None,
         token: str = "",
         profile: Profile | None = None,
+        alive: Path | None = None,
     ):
         self.data = Path(data)
         self.tg = tg
@@ -264,7 +319,24 @@ class Bot:
         self.username = ""
         self.read_all = False  # getMe.can_read_all_group_messages: privacy mode off
         self.last_ai: datetime | None = None  # the last successful assistant turn, for /estado
-        self.commands: dict[str, Callable] = {"hoy": self.cmd_hoy, "today": self.cmd_hoy}
+        self.alive = alive  # touched on every tick, for the container healthcheck
+        self.polling = False  # inside getUpdates: SIGTERM may interrupt it
+        self._backoff = BACKOFF_MIN_S
+        # Spanish names first, English aliases second; the value says who may use it
+        self.commands: dict[str, tuple[Callable, frozenset[str]]] = {}
+        both, admins = frozenset({HER, ADMIN}), frozenset({ADMIN})
+        for names, handler, who in (
+            (("hoy", "today"), self.cmd_hoy, both),
+            (("resumen", "summary"), self.cmd_resumen, both),
+            (("anotar", "log"), self.cmd_anotar, both),
+            (("deshacer", "undo"), self.cmd_deshacer, both),
+            (("estado", "status"), self.cmd_estado, admins),
+            (("nuevo", "new"), self.cmd_nuevo, admins),
+            (("presentacion", "about"), self.cmd_presentacion, admins),
+            (("ayuda", "help"), self.cmd_ayuda, both),
+        ):
+            for name in names:
+                self.commands[name] = (handler, who)
         self.worker = Worker(self._turn)
 
     def start(self) -> None:
@@ -274,6 +346,16 @@ class Bot:
         self.read_all = bool(me.get("can_read_all_group_messages"))
         log.info("bot @%s up", self.username)
         log.info("group privacy %s", "off: every group message arrives" if self.read_all else "on")
+
+    def set_commands(self) -> None:
+        """The menu: one `setMyCommands` in the default scope with the five she uses. The admin
+        commands are listed by /ayuda when an admin asks."""
+        menu = self.t("menu")
+        commands = [{"command": name, "description": menu[name]} for name in MENU]
+        try:
+            self.tg.call("setMyCommands", commands=commands)
+        except TelegramError as e:
+            log.warning("setMyCommands failed: %s", safe(e))
 
     def close(self) -> None:
         self.worker.stop()
@@ -778,6 +860,9 @@ class Bot:
     # --- messages ------------------------------------------------------------------------
 
     def on_message(self, msg: Mapping) -> None:
+        if msg.get("migrate_to_chat_id") is not None:
+            self.migrate(msg)
+            return
         text = msg.get("text")
         if not isinstance(text, str) or not text.strip():
             return
@@ -794,9 +879,10 @@ class Bot:
             name, handle, rest = command.group(1).lower(), command.group(2), command.group(3)
             if handle and handle.lower() != self.username.lower():
                 return  # a command for another bot
-            handler = self.commands.get(name)
-            if handler is not None:
-                handler(msg, (rest or "").strip(), role)
+            entry = self.commands.get(name)
+            if entry is not None and role in entry[1]:
+                entry[0](msg, (rest or "").strip(), role)
+                log.info("command %s", entry[0].__name__.removeprefix("cmd_"))
             return
         content = self.addressed(msg, text, private, role)
         if content is not None:
@@ -873,6 +959,261 @@ class Bot:
             self.queue_text(chat, msg, f"{self.who(role, user)}: {rest}", role)
         else:
             self.send_card(chat, self.today())
+
+    def cmd_resumen(self, msg: Mapping, rest: str, role: str) -> None:
+        """/resumen: last period, recent lengths, usual length, next window, the symptoms she
+        logs most. No AI."""
+        self.send(msg["chat"]["id"], self.summary_text(self.repo.load(), self.today()))
+
+    def summary_text(self, log_: Log, today: date) -> str:
+        t = self.t
+        p = cycle.predict(log_, today)
+        if p is None:
+            return t("summary_empty")
+        logged = sum(1 for d, x in log_.items() if p.last_start <= d <= today and x.bleed)
+        lines = [
+            t("summary_title", name=html.escape(self.profile.name)),
+            t("summary_last", start=t.date(p.last_start, "short"), days=logged),
+        ]
+        if len(p.lengths) >= cycle.MIN_LENGTHS:
+            lengths = ", ".join(str(n) for n in p.lengths)
+            lines.append(t("summary_lengths", lengths=lengths, median=p.median))
+        lines.append(t("summary_period", days=p.period_days))
+        lines.append(
+            t(
+                "summary_next",
+                expected=t.date(p.expected, "short"),
+                ws=t.date(p.window_start, "short"),
+                we=t.date(p.window_end, "short"),
+            )
+        )
+        counts = Counter(s for d, x in log_.items() if d <= today for s in x.symptoms)
+        if counts:
+            top = sorted(counts, key=lambda s: (-counts[s], SYMPTOMS.index(s)))[:3]
+            lines.append(t("summary_symptoms", items=", ".join(t.symptom(s) for s in top)))
+        return "\n".join(lines)
+
+    def cmd_anotar(self, msg: Mapping, rest: str, role: str) -> None:
+        """/anotar <cuándo> <cuánto> [dolor] [síntomas…]: a day without the assistant."""
+        chat = msg["chat"]["id"]
+        today = self.today()
+        try:
+            d, fields = parse_anotar(rest, self.t, today)
+        except ValueError:
+            self.send(chat, self.t("anotar_usage"))
+            log.info("anotar refused")
+            return
+        source = "telegram" if role == HER else "admin"
+        change = self.write(lambda log_: records.apply(log_, Edit(days={d: fields}), source))
+        what = f"{self.t.date(d)}, {self.summary(change.after.get(d))}"
+        self.send(chat, self.t("anotar_saved", summary=what))
+        self.announce(change, chat)
+
+    def cmd_deshacer(self, msg: Mapping, rest: str, role: str) -> None:
+        """/deshacer: the uncommitted batch, else the last `log:` commit (git does the work)."""
+        chat = msg["chat"]["id"]
+        try:
+            change = self.repo.undo()
+        except (GitError, OSError) as e:
+            log.warning("undo failed: %s", safe(e))
+            self.send(chat, self.t("toast_error"))
+            return
+        if not change:
+            self.send(chat, self.t("undo_none"))
+            return
+        what = ", ".join(self.t.date(d) for d in change.dates)
+        self.send(chat, self.t("undo_done", what=what))
+
+    def cmd_estado(self, msg: Mapping, rest: str, role: str) -> None:
+        """/estado (admins): the phase, today's ask, the assistant and the git sync state."""
+        self.send(msg["chat"]["id"], self.status_text(self.today()))
+
+    def status_text(self, today: date) -> str:
+        t = self.t
+        log_ = self.repo.load()
+        ph = self.phase(log_, today)
+        p = ph.prediction
+        dates = {}
+        if p is not None:
+            dates = {"ws": t.date(p.window_start, "short"), "we": t.date(p.window_end, "short")}
+        phase = t(f"phase_{ph.kind}", n=ph.day, **dates)
+        if self.kv.get("last_ask") != today.isoformat():
+            asked = t("status_not_asked")
+        elif today in log_ and log_[today].flow is not None:
+            asked = t("status_answered")
+        else:
+            asked = t("status_asked")
+        if not self.has_assistant:
+            ai = t("status_ai_none")
+        elif self.last_ai is None:
+            ai = t("status_ai_never")
+        else:
+            ai = t("status_ai_ok", ago=_ago(self.now() - self.last_ai))
+        unpushed = self.repo.unpushed()
+        if unpushed:
+            git = t("status_git_unpushed", n=unpushed)
+        elif self.repo.remote_ok is False:
+            git = t("status_git_down")
+        else:
+            git = t("status_git_ok")
+        return t("status", phase=phase, asked=asked, ai=ai, git=git)
+
+    def cmd_nuevo(self, msg: Mapping, rest: str, role: str) -> None:
+        """/nuevo (admins): drop the pending lines and the assistant conversation. A plugin
+        whose `forget` raises keeps the conversation and the admin is told."""
+        chat = msg["chat"]["id"]
+        self.kv.delete(f"pending:{chat}")
+        conversation = self.kv.get(f"conv:{chat}")
+        if conversation and self.has_assistant:
+            block = self.profile.assistant or {}
+            try:
+                assistant.forget(
+                    self.data, block.get("plugin"), conversation, assistant.settings(block)
+                )
+            except Exception as e:  # noqa: BLE001 - the plugin may raise anything
+                log.warning("forget failed: %s", safe(e))
+                self.send(chat, self.t("new_failed"))
+                return
+        self.kv.delete(f"conv:{chat}")
+        self.send(chat, self.t("new_conversation"))
+
+    def cmd_presentacion(self, msg: Mapping, rest: str, role: str) -> None:
+        """/presentacion (admins): the introduction, posted when an admin asks for it."""
+        self.send(msg["chat"]["id"], self.t("intro", name=html.escape(self.profile.name)))
+
+    def cmd_ayuda(self, msg: Mapping, rest: str, role: str) -> None:
+        text = self.t("help")
+        if role == ADMIN:
+            text += "\n\n" + self.t("help_admin")
+        self.send(msg["chat"]["id"], text)
+
+    # --- the loop ------------------------------------------------------------------------
+
+    def migrate(self, msg: Mapping) -> None:
+        """A basic group became a supergroup: use the new id from now on."""
+        old = (msg.get("chat") or {}).get("id")
+        new = _int(msg.get("migrate_to_chat_id"))
+        if new is None or old != self.chat_id:
+            return
+        self.kv.set("migrated_chat", str(new))
+        log.warning("the group became a supergroup: update telegram.chat_id in profile.yaml")
+
+    def ask_due(self, now: datetime) -> date | None:
+        """The bot day whose scheduled card is due at `now`, or None. With `ask_dt =
+        combine(T, ask_at)` in the profile timezone the card goes in `[ask_dt, ask_dt + 2 h)`,
+        once per bot day, and only when the phase wants one."""
+        today = cycle.bot_day(now, self.profile.timezone)
+        if self.kv.get("last_ask") == today.isoformat():
+            return None
+        zone = ZoneInfo(self.profile.timezone)
+        ask_dt = datetime.combine(today, ask_time(self.profile.ask_at), tzinfo=zone)
+        if not ask_dt <= now < ask_dt + ASK_WINDOW:
+            return None
+        log_ = self.repo.load()
+        ph = self.phase(log_, today)
+        if ph.kind == "period":
+            return today if cycle.queue(ph, log_, today) else None
+        if ph.kind in ("waiting", "late"):
+            day = log_.get(today)
+            return today if day is None or day.flow is None else None
+        return None
+
+    def scheduled_ask(self, now: datetime) -> bool:
+        chat = self.chat_id
+        today = self.ask_due(now)
+        if chat is None or today is None:
+            return False
+        try:
+            self.send_card(chat, today)
+        except TelegramError as e:
+            if e.migrate_to_chat_id is not None:
+                self.kv.set("migrated_chat", str(e.migrate_to_chat_id))
+                log.warning("the group became a supergroup: update telegram.chat_id")
+            log.warning("ask failed: %s", safe(e))
+            return False
+        self.kv.set("last_ask", today.isoformat())
+        return True
+
+    def tick(self, now: datetime | None = None) -> None:
+        """Between two polls: the scheduled ask, the git sync and the heartbeat."""
+        now = now or self.now()
+        try:
+            self.scheduled_ask(now)
+        except Exception as e:  # noqa: BLE001 - the loop must go on
+            log.warning("ask failed: %s", safe(e))
+        try:
+            self.repo.flush()
+        except Exception as e:  # noqa: BLE001
+            log.warning("git sync failed: %s", safe(e))
+        if self.alive is not None:
+            try:
+                self.alive.touch()
+            except OSError as e:
+                log.warning("heartbeat failed: %s", safe(e))
+
+    def poll_once(self) -> float:
+        """One `getUpdates` and its updates; returns how long to wait before the next one.
+        409 (another poller) waits 30 s and keeps the offset; 429 waits what Telegram says;
+        5xx and network failures back off from 5 s to 300 s; 401 raises."""
+        offset = self.kv.get("offset")
+        self.polling = True
+        try:
+            updates = self.tg.call(
+                "getUpdates",
+                offset=int(offset) if offset else None,
+                timeout=POLL_S,
+                allowed_updates=["message", "callback_query"],
+            )
+        except TelegramError as e:
+            log.warning("getUpdates failed: %s", safe(e))
+            if e.code == 401:
+                raise
+            if e.code == 409:
+                return WAIT_409_S
+            if e.code == 429:
+                return float(min(e.retry_after or BACKOFF_MIN_S, BACKOFF_MAX_S))
+            delay = self._backoff
+            self._backoff = min(self._backoff * 2, BACKOFF_MAX_S)
+            return delay
+        finally:
+            self.polling = False
+        self._backoff = BACKOFF_MIN_S
+        for update in updates or []:
+            try:
+                self.handle(update)
+            except Exception as e:  # noqa: BLE001 - one bad update must not stop the bot
+                log.error("update failed: %s", safe(e))
+            self.kv.set("offset", str(int(update["update_id"]) + 1))
+        return 0
+
+    def run(self, stop: threading.Event) -> None:
+        """The loop: getMe, the menu and the remote check once, then poll and tick until `stop`
+        is set. On the way out (SIGTERM) the log is committed and pushed at once."""
+        delay = BACKOFF_MIN_S
+        while not stop.is_set():
+            try:
+                self.start()
+                break
+            except TelegramError as e:
+                if e.code == 401:
+                    raise
+                log.warning("getMe failed: %s", safe(e))
+                stop.wait(delay)
+                delay = min(delay * 2, BACKOFF_MAX_S)
+        self.repo.check_remote()
+        self.set_commands()
+        try:
+            while not stop.is_set():
+                try:
+                    wait = self.poll_once()
+                except Interrupted:
+                    break
+                self.tick()
+                if wait:
+                    stop.wait(wait)
+        finally:
+            self.repo.flush(force=True)
+            log.info("stopped")
 
     # --- the assistant turn (worker thread) ----------------------------------------------
 
@@ -1024,6 +1365,116 @@ def split_text(text: str, limit: int = TEXT_MAX) -> list[str]:
 
 def _units(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
+
+
+def _ago(delta: timedelta) -> str:
+    minutes = max(0, int(delta.total_seconds() // 60))
+    if minutes < 60:
+        return f"{minutes} min"
+    if minutes < 48 * 60:
+        return f"{minutes // 60} h"
+    return f"{minutes // (24 * 60)} d"
+
+
+# --- /anotar -------------------------------------------------------------------------------
+
+
+def fold(text: str) -> str:
+    """Lower case without accents, so «miercoles» finds «miércoles»."""
+    decomposed = unicodedata.normalize("NFD", text.lower())
+    return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+
+def _phrase(tokens: list[str], i: int, phrases: Mapping[str, object]) -> tuple[object, int]:
+    """The longest phrase of `phrases` (folded text -> value) at `tokens[i:]`: (value, length),
+    or (None, 0)."""
+    for j in range(len(tokens), i, -1):
+        key = " ".join(tokens[i:j])
+        if key in phrases:
+            return phrases[key], j - i
+    return None, 0
+
+
+def _when(tokens: list[str], t: Translator, today: date) -> tuple[date, int]:
+    """`cuándo` at the start of `tokens`: hoy/ayer/anteayer, a weekday (the most recent past
+    one), D/M (the most recent such date) or YYYY-MM-DD."""
+    back = {"today": 0, "yesterday": 1, "day_before": 2}
+    phrases = {fold(w): back[k] for k, words in t("words_when").items() for w in words}
+    offset, n = _phrase(tokens, 0, phrases)
+    if n:
+        return today - timedelta(days=offset), n
+    first = tokens[0]
+    for names in (t("days"), t("days_short")):
+        folded = [fold(x) for x in names]
+        if first in folded:
+            days = (today.weekday() - folded.index(first)) % 7 or 7
+            return today - timedelta(days=days), 1
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})", first)
+    if m:
+        d = date(today.year, int(m.group(2)), int(m.group(1)))
+        return (d if d <= today else d.replace(year=today.year - 1)), 1
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", first):
+        return date.fromisoformat(first), 1
+    raise ValueError("bad_when")
+
+
+def parse_anotar(text: str, t: Translator, today: date) -> tuple[date, dict]:
+    """`<cuándo> <cuánto> [dolor] [síntomas…]` from the locale's own words: a flow word, an
+    integer 0..10 for the pain («dolor 6» too), symptom labels matched by prefix. Raises
+    `ValueError` with a reason code on anything it does not understand."""
+    tokens = [fold(x) for x in text.split()]
+    if not tokens:
+        raise ValueError("empty")
+    try:
+        d, i = _when(tokens, t, today)
+    except (ValueError, OverflowError):
+        raise ValueError("bad_when") from None
+    if not records.in_range(d, today):
+        raise ValueError("date_out_of_range")
+    flows = {fold(w): k for k, words in t("words_flow").items() for w in words}
+    labels = {fold(t.symptom(s)): s for s in SYMPTOMS}
+    pain_word = fold(t("pain", n="")).strip()
+    fields: dict = {}
+    symptoms: list[str] = []
+    while i < len(tokens):
+        token = tokens[i]
+        if token == pain_word and i + 1 < len(tokens) and tokens[i + 1].isdigit():
+            i += 1
+            token = tokens[i]
+        if token.isdigit():
+            if int(token) > 10 or "pain" in fields:
+                raise ValueError("bad_pain")
+            fields["pain"] = int(token)
+            i += 1
+            continue
+        flow, n = _phrase(tokens, i, flows)
+        if n:
+            if "flow" in fields:
+                raise ValueError("two_flows")
+            fields["flow"] = flow
+            i += n
+            continue
+        symptom, n = _symptom(tokens, i, labels)
+        symptoms.append(symptom)
+        i += n
+    if symptoms:
+        fields["symptoms"] = tuple(sorted(set(symptoms)))
+    if not fields:
+        raise ValueError("nothing_to_note")
+    return d, fields
+
+
+def _symptom(tokens: list[str], i: int, labels: Mapping[str, str]) -> tuple[str, int]:
+    """The symptom whose label the longest run of words at `tokens[i:]` names: the label
+    itself, or the start of exactly one label."""
+    for j in range(len(tokens), i, -1):
+        words = " ".join(tokens[i:j])
+        if words in labels:
+            return labels[words], j - i
+        found = {s for label, s in labels.items() if label.startswith(words)}
+        if len(found) == 1:
+            return found.pop(), j - i
+    raise ValueError("unknown_word")
 
 
 def _same_facts(a: Day, b: Day) -> bool:

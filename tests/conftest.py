@@ -102,6 +102,7 @@ class FakeTelegram:
         }
         self.calls: list[tuple[str, dict]] = []
         self.errors: dict[str, list[TelegramError]] = {}
+        self.updates: list = []  # what each getUpdates returns, in order: a list or a callable
         self._lock = threading.Lock()
         self._next_id = 1000
 
@@ -119,6 +120,9 @@ class FakeTelegram:
                 raise pending.pop(0)
             if method == "getMe":
                 return dict(self.me)
+            if method == "getUpdates":
+                batch = self.updates.pop(0) if self.updates else []
+                return batch() if callable(batch) else batch
             if method == "sendMessage":
                 self._next_id += 1
                 return {
