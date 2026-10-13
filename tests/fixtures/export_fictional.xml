@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE HealthData [
+<!-- A fictional HealthKit export (export version 17 shape): invented dates and values. -->
+<!ELEMENT HealthData (ExportDate,Me,(Record|Workout)*)>
+<!ATTLIST HealthData locale CDATA #REQUIRED>
+<!ELEMENT ExportDate EMPTY>
+<!ATTLIST ExportDate value CDATA #REQUIRED>
+<!ELEMENT Me EMPTY>
+<!ATTLIST Me HKCharacteristicTypeIdentifierBiologicalSex CDATA #REQUIRED>
+<!ELEMENT Record (MetadataEntry*)>
+<!ATTLIST Record type CDATA #REQUIRED sourceName CDATA #REQUIRED startDate CDATA #REQUIRED endDate CDATA #REQUIRED value CDATA #IMPLIED>
+<!ELEMENT MetadataEntry EMPTY>
+<!ATTLIST MetadataEntry key CDATA #REQUIRED value CDATA #REQUIRED>
+<!ELEMENT Workout EMPTY>
+<!ATTLIST Workout workoutActivityType CDATA #REQUIRED>
+]>
+<HealthData locale="es_ES">
+ <ExportDate value="2028-05-20 10:00:00 +0200"/>
+ <Me HKCharacteristicTypeIdentifierBiologicalSex="HKBiologicalSexFemale"/>
+ <Record type="HKQuantityTypeIdentifierStepCount" sourceName="Phone" startDate="2028-01-10 08:00:00 +0100" endDate="2028-01-10 09:00:00 +0100" value="812">
+  <MetadataEntry key="HKMetadataKeyExample" value="1"/>
+ </Record>
+ <Record type="HKCategoryTypeIdentifierMenstrualFlow" sourceName="Phone" startDate="2028-01-10 12:00:00 +0100" endDate="2028-01-10 12:00:00 +0100" value="HKCategoryValueVaginalBleedingLight">
+  <MetadataEntry key="HKMenstrualCycleStart" value="1"/>
+ </Record>
+ <Record type="HKCategoryTypeIdentifierAbdominalCramps" sourceName="Phone" startDate="2028-01-10 12:00:00 +0100" endDate="2028-01-10 12:00:00 +0100" value="HKCategoryValueSeverityModerate"/>
+ <Record type="HKCategoryTypeIdentifierHeadache" sourceName="Phone" startDate="2028-01-10 12:00:00 +0100" endDate="2028-01-10 12:00:00 +0100" value="HKCategoryValueSeverityNotPresent"/>
+ <Record type="HKCategoryTypeIdentifierMenstrualFlow" sourceName="Phone" startDate="2028-01-11 09:00:00 +0100" endDate="2028-01-11 09:00:00 +0100" value="HKCategoryValueMenstrualFlowMedium">
+  <MetadataEntry key="HKMenstrualCycleStart" value="0"/>
+ </Record>
+ <Record type="HKCategoryTypeIdentifierMenstrualFlow" sourceName="Watch" startDate="2028-01-11 20:00:00 +0100" endDate="2028-01-11 20:00:00 +0100" value="4"/>
+ <Record type="HKCategoryTypeIdentifierBloating" sourceName="Phone" startDate="2028-01-11 12:00:00 +0100" endDate="2028-01-11 12:00:00 +0100" value="1"/>
+ <Record type="HKCategoryTypeIdentifierFatigue" sourceName="Phone" startDate="2028-01-11 12:00:00 +0100" endDate="2028-01-11 12:00:00 +0100" value="3"/>
+ <Record type="HKCategoryTypeIdentifierAppetiteChanges" sourceName="Phone" startDate="2028-01-11 12:00:00 +0100" endDate="2028-01-11 12:00:00 +0100" value="HKCategoryValueAppetiteChangesNoChange"/>
+ <Record type="HKCategoryTypeIdentifierMenstrualFlow" sourceName="Phone" startDate="2028-01-12 12:00:00 +0100" endDate="2028-01-12 12:00:00 +0100" value="3">
+  <MetadataEntry key="HKMenstrualCycleStart" value="1"/>
+ </Record>
+ <Record type="HKCategoryTypeIdentifierMenstrualFlow" sourceName="Phone" startDate="2028-01-13 12:00:00 +0100" endDate="2028-01-13 12:00:00 +0100" value="HKCategoryValueVaginalBleedingNone"/>
+ <Workout workoutActivityType="HKWorkoutActivityTypeWalking"/>
+ <Record type="HKCategoryTypeIdentifierIntermenstrualBleeding" sourceName="Phone" startDate="2028-01-24 12:00:00 +0100" endDate="2028-01-24 12:00:00 +0100" value="HKCategoryValueNotApplicable"/>
+ <Record type="HKCategoryTypeIdentifierMenstrualFlow" sourceName="Phone" startDate="2028-02-07 23:30:00 +0000" endDate="2028-02-07 23:30:00 +0000" value="HKCategoryValueVaginalBleedingLight">
+  <MetadataEntry key="HKMenstrualCycleStart" value="1"/>
+ </Record>
+ <Record type="HKCategoryTypeIdentifierMenstrualFlow" sourceName="Phone" startDate="2028-02-09 12:00:00 +0100" endDate="2028-02-09 12:00:00 +0100" value="HKCategoryValueVaginalBleedingMedium"/>
+ <Record type="HKCategoryTypeIdentifierMenstrualFlow" sourceName="Phone" startDate="2028-02-10 12:00:00 +0100" endDate="2028-02-10 12:00:00 +0100" value="1"/>
+ <Record type="HKCategoryTypeIdentifierMenstrualFlow" sourceName="Phone" startDate="2028-03-07 12:00:00 +0100" endDate="2028-03-07 12:00:00 +0100" value="HKCategoryValueVaginalBleedingMedium">
+  <MetadataEntry key="HKMenstrualCycleStart" value="1"/>
+ </Record>
+ <Record type="HKCategoryTypeIdentifierMenstrualFlow" sourceName="Phone" startDate="2028-03-08 12:00:00 +0100" endDate="2028-03-08 12:00:00 +0100" value="HKCategoryValueVaginalBleedingHeavy"/>
+</HealthData>
