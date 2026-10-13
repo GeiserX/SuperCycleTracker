@@ -247,6 +247,29 @@ def test_a_pull_killed_by_the_timeout_is_aborted(data_repo, monkeypatch):
     assert repo.unpushed() == 1
 
 
+def test_a_conflict_probe_killed_by_the_timeout_still_aborts_the_rebase(data_repo, monkeypatch):
+    dr = data_repo
+    repo = Repo(dr.data, clock=Clock())
+    tap(repo, flow="heavy")
+    git(dr.human, "pull", "--quiet")
+    git(dr.human, "rm", "--quiet", LOG_FILE)
+    git(dr.human, "commit", "--quiet", "-m", "remove the log")
+    git(dr.human, "push", "--quiet")
+    real = repo._git
+
+    def slow_probe(*args):
+        if args[0] == "diff":  # the pull failed mid-rebase, then the probe hit the timeout
+            assert rebasing(dr.data)
+            raise subprocess.TimeoutExpired(["git", "diff"], 60)
+        return real(*args)
+
+    monkeypatch.setattr(repo, "_git", slow_probe)
+    assert repo.flush(force=True) == "failed"
+    assert repo.last_error == "TimeoutExpired"
+    assert not rebasing(dr.data)
+    assert repo.unpushed() == 1
+
+
 def test_starts_are_rederived_after_a_pull_that_changed_the_log(data_repo):
     dr = data_repo
     repo = Repo(dr.data, clock=Clock())

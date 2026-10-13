@@ -335,8 +335,10 @@ class Repo:
             raise
         self._last_pull = self.clock()
         if r.returncode != 0:
-            conflict = self._git("diff", "--name-only", "--diff-filter=U").stdout.strip()
-            self._abort_rebase()
+            try:
+                conflict = self._git("diff", "--name-only", "--diff-filter=U").stdout.strip()
+            finally:
+                self._abort_rebase()  # even when the conflict probe itself times out
             raise GitError("pull_conflict" if conflict else "pull_failed")
         if self._read() != before:
             self._rederive()
