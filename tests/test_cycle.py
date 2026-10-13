@@ -235,6 +235,21 @@ def test_day_eight_is_period_only_while_days_are_missing():
     assert phase(gaps, d("2027-05-09")).kind == "quiet"
 
 
+def test_period_max_day_moves_the_last_daily_ask_and_the_catch_up_day():
+    log = with_days({}, *[(f"2027-05-{i:02d}", "light") for i in range(1, 11)])
+    ph = phase(log, d("2027-05-10"), max_day=10)
+    assert (ph.kind, ph.day) == ("period", 10)
+    assert queue(ph, log, d("2027-05-10"), max_day=10) == ()  # today already has a flow
+    assert phase(log, d("2027-05-10")).kind != "period"  # the default stops at day 7
+
+    gaps = with_days({}, ("2027-05-01", "light"), ("2027-05-02", "light"))
+    ph = phase(gaps, d("2027-05-04"), max_day=3)
+    assert (ph.kind, ph.day) == ("period", 4)  # the catch-up day, for 05-03
+    assert queue(ph, gaps, d("2027-05-04"), max_day=3) == (d("2027-05-03"),)
+    assert phase(gaps, d("2027-05-05"), max_day=3).kind != "period"
+    assert cycle.catchup_day(3) == 4
+
+
 def test_quiet_waiting_late_and_their_exits():
     log = history("2027-01-01", [30, 30, 30])  # last start 2027-04-01, expected 05-01
     p = predict(log, d("2027-04-10"))

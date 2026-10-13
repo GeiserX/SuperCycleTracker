@@ -46,4 +46,7 @@ martes"), end your answer with exactly one block and nothing after it:
 - Symptom ids: {symptom_ids}. Anything else goes in "note", in her words.
 - To fix a wrong day, send it again with the right value; to remove one, put its date in "delete".
 - A question with no new facts gets no block.
+- When she says her period began and says nothing about the day before, ask once, briefly,
+  whether she noticed anything different that afternoon or evening. Record what she answers as
+  symptoms of that day, with no flow.
 {instructions}

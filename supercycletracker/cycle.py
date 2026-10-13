@@ -22,8 +22,7 @@ MIN_LENGTHS = 3
 DEFAULT_LENGTH = 28
 DEFAULT_PERIOD_DAYS = 5
 MIN_RUN = 3  # a run of bleed days shorter than this is a partly logged period
-PERIOD_MAX_DAY = 7  # the bot asks daily up to day 7
-CATCHUP_DAY = 8  # on day 8 it asks only for the gaps, once
+PERIOD_MAX_DAY = 7  # default `period_max_day`: the last period day the bot asks about daily
 MISSING_BACK = 3  # missing days older than this are never asked about
 KINDS = ("no_history", "quiet", "waiting", "late", "period")  # every Phase.kind
 
@@ -112,8 +111,19 @@ def predict(log: Mapping[date, Day], today: date) -> Prediction | None:
     )
 
 
-def phase(log: Mapping[date, Day], today: date, skipped: Collection[date] = ()) -> Phase:
-    """Where she is on bot day `today`. `skipped` are the days she answered «No me acuerdo»."""
+def catchup_day(max_day: int = PERIOD_MAX_DAY) -> int:
+    """The day after the last daily ask: the bot asks only for the gaps then, once."""
+    return max_day + 1
+
+
+def phase(
+    log: Mapping[date, Day],
+    today: date,
+    skipped: Collection[date] = (),
+    max_day: int = PERIOD_MAX_DAY,
+) -> Phase:
+    """Where she is on bot day `today`. `skipped` are the days she answered «No me acuerdo»;
+    `max_day` is the last period day the bot asks about daily (the profile's `period_max_day`)."""
     past = _upto(log, today)
     first_days = starts(past)
     prediction = predict(past, today)
@@ -129,7 +139,7 @@ def phase(log: Mapping[date, Day], today: date, skipped: Collection[date] = ()) 
     closing = latest_date if not latest.bleed else None
 
     missing: tuple[date, ...] = ()
-    if n <= CATCHUP_DAY:
+    if n <= catchup_day(max_day):
         first = max(start, today - timedelta(days=MISSING_BACK))
         missing = tuple(
             d
@@ -139,7 +149,7 @@ def phase(log: Mapping[date, Day], today: date, skipped: Collection[date] = ()) 
             and (closing is None or d < closing)
         )
 
-    is_open = closing is None and (n <= PERIOD_MAX_DAY or (n == CATCHUP_DAY and bool(missing)))
+    is_open = closing is None and (n <= max_day or (n == catchup_day(max_day) and bool(missing)))
     if is_open:
         return Phase("period", n, start, missing, prediction)
     if prediction.window_start <= today <= prediction.window_end:
@@ -151,14 +161,17 @@ def phase(log: Mapping[date, Day], today: date, skipped: Collection[date] = ()) 
     return Phase(kind, None, start, missing, prediction)
 
 
-def queue(ph: Phase, log: Mapping[date, Day], today: date) -> tuple[date, ...]:
+def queue(
+    ph: Phase, log: Mapping[date, Day], today: date, max_day: int = PERIOD_MAX_DAY
+) -> tuple[date, ...]:
     """The dates the check-in card still wants: missing days oldest first, then today while
-    today has no flow. On day 8 (the catch-up day) only the missing days. Outside an open period
-    nothing: a closed period is not asked about, even for gaps before its closing `none`."""
+    today has no flow. On the catch-up day (`max_day + 1`) only the missing days. Outside an
+    open period nothing: a closed period is not asked about, even for gaps before its closing
+    `none`."""
     if ph.kind != "period":
         return ()
     dates = list(ph.missing)
-    if ph.day is not None and ph.day <= PERIOD_MAX_DAY:
+    if ph.day is not None and ph.day <= max_day:
         day = log.get(today)
         if day is None or day.flow is None:
             dates.append(today)

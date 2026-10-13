@@ -6,7 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
-from conftest import Clock, FakeTelegram
+from conftest import Clock, FakeTelegram, seed_log
 
 from supercycletracker import assistant, cycle, records
 from supercycletracker.bot import (
@@ -164,7 +164,12 @@ def test_callback_data_is_parsed_strictly_and_fits_64_bytes():
     ):
         with pytest.raises(ValueError):
             parse_callback(bad)
+    assert parse_callback("e:20270303:fatigue") == ("e", date(2027, 3, 3), "fatigue")
+    assert parse_callback("ed:20270303") == ("ed", date(2027, 3, 3), None)
+    with pytest.raises(ValueError):
+        parse_callback("e:20270303:fever")
     assert len(b"s:20270304:appetite_changes") <= 64
+    assert len(b"e:20270304:appetite_changes") <= 64
 
 
 def test_three_taps_walk_one_message_and_record_the_day(make_bot):
@@ -181,6 +186,7 @@ def test_three_taps_walk_one_message_and_record_the_day(make_bot):
     tap(bot, "p:20270329:4", message_id=mid)
     tap(bot, "s:20270329:abdominal_cramps", message_id=mid)
     tap(bot, "d:20270329", message_id=mid)
+    tap(bot, "ed:20270328", message_id=mid)  # the day before: «Nada especial»
     assert len(bot.tg.of("sendMessage")) == 1  # the card only: every step edited it
     steps = edits(bot)
     assert {e["message_id"] for e in steps} == {mid}
@@ -309,11 +315,79 @@ def test_the_picker_starts_an_earlier_day_and_then_asks_the_gaps(make_bot):
     tap(bot, "f:20270325:medium", message_id=mid)
     tap(bot, "p:20270325:2", message_id=mid)
     tap(bot, "d:20270325", message_id=mid)
+    assert buttons(edits(bot)[-1]["reply_markup"])[-1] == "ed:20270324"  # the day before
+    tap(bot, "ed:20270324", message_id=mid)
     nxt = edits(bot)[-1]
     assert nxt["text"] == "Anotado el jueves 25 de marzo. Ahora, ¿cómo fue el viernes 26 de marzo?"
     assert buttons(nxt["reply_markup"])[0] == "f:20270326:light"
     tap(bot, "back:20270329", message_id=mid)  # «Volver» goes back to the waiting card
     assert buttons(edits(bot)[-1]["reply_markup"])[0] == "y:20270329:light"
+
+
+def test_a_start_from_the_card_asks_about_the_day_before(make_bot):
+    bot = make_bot(today=date(2027, 3, 29))
+    mid = card(bot)
+    tap(bot, "y:20270329:heavy", message_id=mid)
+    tap(bot, "p:20270329:5", message_id=mid)
+    tap(bot, "d:20270329", message_id=mid)
+    eve = edits(bot)[-1]
+    assert eve["text"] == (
+        "Lunes 29 de marzo: mucho, dolor 5. ¿Y el día de antes (domingo 28 de marzo), por la "
+        "tarde o por la noche, notaste algo distinto?"
+    )
+    assert buttons(eve["reply_markup"]) == [
+        "e:20270328:mood_changes",
+        "e:20270328:fatigue",
+        "e:20270328:abdominal_cramps",
+        "e:20270328:bloating",
+        "e:20270328:headache",
+        "e:20270328:lower_back_pain",
+        "ed:20270328",
+        "ed:20270328",
+    ]
+    labels = [b["text"] for row in eve["reply_markup"]["inline_keyboard"] for b in row]
+    assert labels[:3] == ["cambios de humor", "cansancio", "calambres"]
+    assert labels[-2:] == ["Nada especial", "Listo"]
+
+    tap(bot, "e:20270328:headache", message_id=mid)
+    tap(bot, "e:20270328:fatigue", message_id=mid)
+    eve = day(bot, date(2027, 3, 28))
+    assert (eve.flow, eve.symptoms, eve.cycle_start) == (None, ("fatigue", "headache"), False)
+    assert day(bot, date(2027, 3, 29)).cycle_start  # a symptom-only day never moves a start
+    marked = [b["text"] for row in edits(bot)[-1]["reply_markup"]["inline_keyboard"] for b in row]
+    assert "✓ dolor de cabeza" in marked and "✓ cansancio" in marked
+    assert edits(bot)[-1]["text"].startswith(
+        "Lunes 29 de marzo: mucho, dolor 5. ¿Y el día de antes"
+    )
+
+    tap(bot, "ed:20270328", message_id=mid)
+    assert edits(bot)[-1]["text"].startswith("Hecho: lunes 29 de marzo, día 1. Mucho, dolor 5.")
+    assert buttons(edits(bot)[-1]["reply_markup"]) == ["fix:20270329", "more:20270329"]
+    assert {e["message_id"] for e in edits(bot)} == {mid}
+
+
+def test_the_day_before_is_not_asked_when_it_already_says_something_or_for_a_later_day(make_bot):
+    noted = {date(2027, 3, 28): Day(date(2027, 3, 28), "telegram", symptoms=("bloating",))}
+    bot = make_bot(today=date(2027, 3, 29), log={**seed_log(), **noted})
+    tap(bot, "y:20270329:light")
+    tap(bot, "d:20270329")
+    assert edits(bot)[-1]["text"].startswith("Hecho: lunes 29 de marzo, día 1.")
+    assert day(bot, date(2027, 3, 28)).symptoms == ("bloating",)
+
+    later = make_bot()  # 2027-03-04, period day 4: not a start
+    tap(later, "f:20270304:light")
+    tap(later, "d:20270304")
+    assert later.tg.of("editMessageText")[-1]["text"].startswith("Hecho: jueves 4 de marzo, día 4.")
+
+
+def test_the_day_before_offers_what_she_logs_there_most(make_bot):
+    log = records.load(FIXTURES / "log_fictional.jsonl")
+    starts = records.starts(log)[-3:]
+    for s in starts:
+        eve = s - timedelta(days=1)
+        log[eve] = Day(eve, "telegram", symptoms=("breast_pain",))
+    bot = make_bot(today=starts[-1] + timedelta(days=40), log=log)
+    assert bot.eve_symptoms(bot.repo.load())[0] == "breast_pain"
 
 
 def test_not_yet_stores_nothing(make_bot):
@@ -375,6 +449,19 @@ def test_day_seven_says_the_bot_stops_asking_daily(make_bot):
         "cuando quieras; si dura bastante más de lo habitual, merece la pena comentarlo con tu "
         "médico."
     )
+
+
+def test_period_max_day_from_the_profile_moves_the_last_daily_ask(make_bot):
+    first = date(2027, 3, 1)
+    log = {
+        first + timedelta(days=i): Day(first + timedelta(days=i), "telegram", flow="light")
+        for i in range(4)
+    }
+    profile = PROFILE.replace('ask_at: "21:00"', 'ask_at: "21:00"\nperiod_max_day: 5')
+    bot = make_bot(log=log, today=date(2027, 3, 5), profile=profile)
+    tap(bot, "f:20270305:same")
+    assert "Llevamos 5 días, así que dejo de preguntarte cada día." in edits(bot)[-1]["text"]
+    assert bot.ask_due(at(date(2027, 3, 6))) is None  # day 6: nothing missing, no card
 
 
 def test_pain_high_goes_out_once_per_crossing(make_bot):
@@ -1015,6 +1102,26 @@ def test_resumen_on_the_fictional_log(make_bot):
         "• Duración habitual: 4 días.\n"
         "• Próxima: hacia el 27 de septiembre (entre el 24 de septiembre y el 1 de octubre).\n"
         "• Lo que más anotas: calambres, dolor de cabeza, dolor lumbar."
+    )
+
+
+def test_resumen_tells_what_she_notices_before_a_start_from_three_starts(make_bot):
+    log = records.load(FIXTURES / "log_fictional.jsonl")
+    starts = records.starts(log)
+    marks = {1: ("mood_changes", "fatigue"), 2: ("fatigue",)}  # days before a start
+    for s, back in zip(starts[-3:], (1, 1, 2), strict=True):
+        eve = s - timedelta(days=back)
+        log[eve] = Day(eve, "telegram", symptoms=marks[back])
+    bot = make_bot(today=date(2025, 9, 10), log=log)
+    say(bot, "/resumen")
+    assert "• Antes de la regla sueles notar" not in bot.tg.texts()[-1]  # two starts only
+
+    eve = starts[-4] - timedelta(days=1)
+    log[eve] = Day(eve, "telegram", symptoms=("bloating",))
+    bot2 = make_bot(today=date(2025, 9, 10), log=log)
+    say(bot2, "/resumen")
+    assert bot2.tg.texts()[-1].endswith(
+        "• Antes de la regla sueles notar: cansancio, cambios de humor, hinchazón."
     )
 
 

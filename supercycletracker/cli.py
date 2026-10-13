@@ -118,7 +118,10 @@ def cmd_predict(a) -> int:
         return 1
     tz = profile.timezone if profile is not None and "bad_timezone" not in problems else "UTC"
     today = a.today or cycle.bot_day(datetime.now(UTC), tz)
-    ph = cycle.phase(log, today)
+    max_day = cycle.PERIOD_MAX_DAY
+    if profile is not None and "bad_period_max_day" not in problems:
+        max_day = profile.period_max_day
+    ph = cycle.phase(log, today, max_day=max_day)
     p = ph.prediction
     print(f"today: {today.isoformat()}")
     print(f"starts: {len(records.starts({d: x for d, x in log.items() if d <= today}))}")

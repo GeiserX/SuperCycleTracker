@@ -50,6 +50,16 @@ DEFAULT_SYMPTOMS = (
     "constipation",
     "lower_back_pain",
 )
+# the eve step's toggles (the day before a start): her most frequent there, padded with these
+DEFAULT_EVE_SYMPTOMS = (
+    "mood_changes",
+    "fatigue",
+    "abdominal_cramps",
+    "bloating",
+    "headache",
+    "lower_back_pain",
+)
+EVE_SUMMARY_MIN = 3  # /resumen tells the day-before pattern from this many starts with one
 PAIN_HIGH = 8  # a day crossing into this pain or more posts `pain_high`
 TEXT_MAX = 4096  # Telegram's limit on one message, in UTF-16 code units
 VOICE_MAX = 20 * 1024 * 1024  # the largest file the Bot API lets a bot download
@@ -59,6 +69,7 @@ NOT_MODIFIED = "message is not modified"
 HER, ADMIN = "her", "admin"
 ASK_WINDOW = timedelta(hours=2)  # a bot that was down at ask_at still asks up to 2 h later
 ASK_EARLIEST = clock_time(5, 0)  # a bot day starts at 05:00, so ask_at must not be earlier
+PERIOD_MAX_DAYS = range(3, 15)  # the values `period_max_day` may take
 POLL_S = 20  # getUpdates long poll
 WAIT_409_S = 30  # another poller holds the token: wait and keep the offset
 TICK_S = 60  # a long wait ticks at least this often: the healthcheck allows 180 s
@@ -72,8 +83,9 @@ _VALUES = {
     "f": frozenset({"none", "light", "medium", "heavy", "same"}),
     "p": frozenset(str(n) for n in range(11)),
     "s": frozenset(SYMPTOMS),
+    "e": frozenset(SYMPTOMS),
 }
-_NO_VALUE = frozenset({"d", "pick", "back", "wait", "skip", "fix", "more"})
+_NO_VALUE = frozenset({"d", "ed", "pick", "back", "wait", "skip", "fix", "more"})
 
 
 # --- the profile ---------------------------------------------------------------------------
@@ -87,6 +99,7 @@ class Profile:
     timezone: str = "UTC"
     language: str = "en"
     ask_at: str = "21:00"
+    period_max_day: int | None = cycle.PERIOD_MAX_DAY  # None: not an integer (profile_errors)
     birth_date: date | None = None
     chat_id: int | None = None
     user_id: int | None = None
@@ -109,11 +122,13 @@ class Profile:
             raise ValueError("bad_profile")  # noqa: TRY004
         username = tg.get("username")
         block = raw.get("assistant")
+        max_day = raw.get("period_max_day")
         return cls(
             name=str(raw.get("name") or ""),
             timezone=str(raw.get("timezone") or "UTC"),
             language=str(raw.get("language") or "en"),
             ask_at=_clock_text(raw.get("ask_at")),
+            period_max_day=cycle.PERIOD_MAX_DAY if max_day is None else _int(max_day),
             birth_date=birth if isinstance(birth, date) else None,
             chat_id=_int(tg.get("chat_id")),
             user_id=_int(tg.get("user_id")),
@@ -153,6 +168,8 @@ def profile_errors(p: Profile, data: str | Path) -> list[str]:
         ask_time(p.ask_at)
     except ValueError:
         errors.append("bad_ask_at")
+    if p.period_max_day not in PERIOD_MAX_DAYS:
+        errors.append("bad_period_max_day")
     if p.chat_id is None:
         errors.append("missing_chat_id")
     if p.user_id is None:
@@ -169,6 +186,8 @@ def profile_errors(p: Profile, data: str | Path) -> list[str]:
 
 
 def _int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
     return int(value) if isinstance(value, int | str) and str(value).lstrip("-").isdigit() else None
 
 
@@ -437,8 +456,16 @@ class Bot:
     def skipped(self) -> set[date]:
         return {date.fromisoformat(k.removeprefix("skip:")) for k in self.kv.keys("skip:")}
 
+    @property
+    def max_day(self) -> int:
+        """The last period day the bot asks about daily (`period_max_day`)."""
+        return self.profile.period_max_day or cycle.PERIOD_MAX_DAY
+
     def phase(self, log_: Log, today: date) -> cycle.Phase:
-        return cycle.phase(log_, today, self.skipped())
+        return cycle.phase(log_, today, self.skipped(), self.max_day)
+
+    def queue(self, ph: cycle.Phase, log_: Log, today: date) -> tuple[date, ...]:
+        return cycle.queue(ph, log_, today, self.max_day)
 
     def summary(self, day: Day | None) -> str:
         """«normal, dolor 4, calambres»: the day in her words, no note."""
@@ -543,23 +570,35 @@ class Bot:
 
     def top_symptoms(self, log_: Log) -> list[str]:
         """Her most frequent symptoms in the log, padded with the defaults in their order."""
-        counts = Counter(s for day in log_.values() for s in day.symptoms)
-        top = sorted(counts, key=lambda s: (-counts[s], SYMPTOMS.index(s)))[:SYMPTOM_BUTTONS]
-        for s in DEFAULT_SYMPTOMS:
-            if len(top) >= SYMPTOM_BUTTONS:
-                break
-            if s not in top:
-                top.append(s)
-        return top
+        return _top(Counter(s for day in log_.values() for s in day.symptoms), DEFAULT_SYMPTOMS)
+
+    def eve_symptoms(self, log_: Log) -> list[str]:
+        """Her most frequent symptoms on the day before a start, padded with the eve defaults."""
+        return _top(eve_counts(log_, (1,)), DEFAULT_EVE_SYMPTOMS)
+
+    def _toggles(self, kind: str, d: date, log_: Log, shown: list[str]) -> list:
+        """The symptom toggle rows for date `d`: a chosen one shows «✓», and one chosen in
+        words that is not among the six is added after them."""
+        chosen = set(log_[d].symptoms) if d in log_ else set()
+        shown = shown + [s for s in SYMPTOMS if s in chosen and s not in shown]
+        k = _key(d)
+        buttons = [
+            (("✓ " if s in chosen else "") + self.t.symptom(s), f"{kind}:{k}:{s}") for s in shown
+        ]
+        return _rows(buttons, 3)
 
     def kb_symptoms(self, d: date, log_: Log) -> dict:
         t, k = self.t, _key(d)
-        chosen = set(log_[d].symptoms) if d in log_ else set()
-        shown = self.top_symptoms(log_)
-        shown += [s for s in SYMPTOMS if s in chosen and s not in shown]  # one chosen in words
-        buttons = [(("✓ " if s in chosen else "") + t.symptom(s), f"s:{k}:{s}") for s in shown]
-        rows = _rows(buttons, 3)
+        rows = self._toggles("s", d, log_, self.top_symptoms(log_))
         rows.append([(t("btn_other"), f"more:{k}"), (t("btn_done"), f"d:{k}")])
+        return _keyboard(rows)
+
+    def kb_eve(self, eve: date, log_: Log) -> dict:
+        """The eve step's keyboard, bound to the day before the start: «Nada especial» and
+        «Listo» both finish it."""
+        t, k = self.t, _key(eve)
+        rows = self._toggles("e", eve, log_, self.eve_symptoms(log_))
+        rows.append([(t("btn_nothing"), f"ed:{k}"), (t("btn_done"), f"ed:{k}")])
         return _keyboard(rows)
 
     def kb_done(self, d: date) -> dict:
@@ -583,7 +622,7 @@ class Bot:
         if d == today:
             n = ph.day if ph.kind == "period" else self.period_day(d, log_)
             return t("ask_period", m=m, n=n) if n else t("ask_late", m=m)
-        if ph.kind == "period" and ph.day == cycle.CATCHUP_DAY:
+        if ph.kind == "period" and ph.day == cycle.catchup_day(self.max_day):
             return t("ask_catchup", m=m, date=t.date(d))
         if d == today - timedelta(days=1):
             return t("ask_gap_one", m=m, date=t.date(d))
@@ -599,7 +638,7 @@ class Bot:
         log_ = self.repo.load()
         ph = self.phase(log_, today)
         if ph.kind == "period":
-            dates = cycle.queue(ph, log_, today)
+            dates = self.queue(ph, log_, today)
             d = dates[0] if dates else today
             return self.ask_text(d, log_, today, ph), self.kb_period(d, log_, today)
         return self.waiting_text(ph), self.kb_waiting(today)
@@ -629,9 +668,9 @@ class Bot:
             text = t("toast_saved", what=summary)
         else:
             text = t("card_done", date=t.date(d), n=n, summary=summary)
-        if ph.kind == "period" and ph.day == cycle.PERIOD_MAX_DAY:
-            text += " " + t("day7")
-        elif ph.kind == "period" and ph.day is not None and ph.day < cycle.PERIOD_MAX_DAY:
+        if ph.kind == "period" and ph.day == self.max_day:
+            text += " " + t("day7", n=self.max_day)
+        elif ph.kind == "period" and ph.day is not None and ph.day < self.max_day:
             text += " " + t("tomorrow", time=self.profile.ask_at)
         return text
 
@@ -731,20 +770,43 @@ class Bot:
         self.symptoms_step(tap, d, change.after)
         self.announce(change, tap.chat)
 
-    def _tap_s(self, tap: Tap, d: date, value: str, today: date) -> None:
-        def toggle(log_: Log) -> Change:
+    def toggle(self, tap: Tap, d: date, value: str) -> Change:
+        """Add or remove one symptom on date `d`."""
+
+        def flip(log_: Log) -> Change:
             current = set(log_[d].symptoms) if d in log_ else set()
             current ^= {value}
             return records.apply(log_, Edit(days={d: {"symptoms": tuple(current)}}), tap.source)
 
-        change = self.write(toggle)
+        change = self.write(flip)
         self.answer(tap.id, self.t("toast_saved", what=self.t.symptom(value)))
+        return change
+
+    def _tap_s(self, tap: Tap, d: date, value: str, today: date) -> None:
+        change = self.toggle(tap, d, value)
         self.symptoms_step(tap, d, change.after)
         self.announce(change, tap.chat)
 
     def _tap_d(self, tap: Tap, d: date, value: None, today: date) -> None:
+        """«Listo» on the symptoms step: the eve step when `d` is a start and the day before
+        says nothing yet, else the next queued date or the done step."""
         self.answer(tap.id)
-        self.advance(tap, d, self.repo.load(), today)
+        log_ = self.repo.load()
+        if self.wants_eve(d, log_, today):
+            self.eve_step(tap, d, log_)
+            return
+        self.advance(tap, d, log_, today)
+
+    def _tap_e(self, tap: Tap, eve: date, value: str, today: date) -> None:
+        """A symptom on the day before a start: a symptom-only day, which never moves a start."""
+        change = self.toggle(tap, eve, value)
+        self.eve_step(tap, eve + timedelta(days=1), change.after)
+        self.announce(change, tap.chat)
+
+    def _tap_ed(self, tap: Tap, eve: date, value: None, today: date) -> None:
+        """«Nada especial» or «Listo» on the eve step: on to the start's done step."""
+        self.answer(tap.id)
+        self.advance(tap, eve + timedelta(days=1), self.repo.load(), today)
 
     def _tap_pick(self, tap: Tap, d: date, value: None, today: date) -> None:
         self.answer(tap.id)
@@ -793,9 +855,26 @@ class Bot:
         text = self.t("ask_symptoms", done=self.done_line(d, log_))
         self.edit(tap, text, self.kb_symptoms(d, log_))
 
+    def wants_eve(self, d: date, log_: Log, today: date) -> bool:
+        """Whether the card asks about the day before `d`: `d` is a start, and that day has no
+        flow and no symptom yet and is recent enough for a tap to record it."""
+        day = log_.get(d)
+        if day is None or not day.cycle_start:
+            return False
+        eve = d - timedelta(days=1)
+        before = log_.get(eve)
+        if before is not None and (before.flow is not None or before.symptoms):
+            return False
+        return records.in_range(eve, today)
+
+    def eve_step(self, tap: Tap, d: date, log_: Log) -> None:
+        eve = d - timedelta(days=1)
+        text = self.t("ask_eve", done=self.done_line(d, log_), date=self.t.date(eve))
+        self.edit(tap, text, self.kb_eve(eve, log_))
+
     def next_date(self, d: date, log_: Log, today: date) -> date | None:
         ph = self.phase(log_, today)
-        dates = [x for x in cycle.queue(ph, log_, today) if x != d]
+        dates = [x for x in self.queue(ph, log_, today) if x != d]
         return dates[0] if dates else None
 
     def advance(self, tap: Tap, d: date, log_: Log, today: date) -> None:
@@ -1072,10 +1151,15 @@ class Bot:
                 we=t.date(p.window_end, "short"),
             )
         )
-        counts = Counter(s for d, x in log_.items() if d <= today for s in x.symptoms)
+        past = {d: x for d, x in log_.items() if d <= today}
+        counts = Counter(s for x in past.values() for s in x.symptoms)
         if counts:
             top = sorted(counts, key=lambda s: (-counts[s], SYMPTOMS.index(s)))[:3]
             lines.append(t("summary_symptoms", items=", ".join(t.symptom(s) for s in top)))
+        if eve_starts(past) >= EVE_SUMMARY_MIN:
+            eve = eve_counts(past, (1, 2))
+            top = sorted(eve, key=lambda s: (-eve[s], SYMPTOMS.index(s)))[:3]
+            lines.append(t("summary_eve", items=", ".join(t.symptom(s) for s in top)))
         return "\n".join(lines)
 
     def cmd_anotar(self, msg: Mapping, rest: str, role: str) -> None:
@@ -1201,7 +1285,7 @@ class Bot:
         log_ = self.repo.load()
         ph = self.phase(log_, today)
         if ph.kind == "period":
-            return today if cycle.queue(ph, log_, today) else None
+            return today if self.queue(ph, log_, today) else None
         if ph.kind in ("waiting", "late"):
             day = log_.get(today)
             return today if day is None or day.flow is None else None
@@ -1358,6 +1442,7 @@ class Bot:
                 admins=admins,
                 birth_date=p.birth_date,
                 ask_at=p.ask_at,
+                period_max_day=self.max_day,
                 asked=self.kv.get("last_ask") == today.isoformat(),
                 skipped=self.skipped(),
             )
@@ -1559,6 +1644,34 @@ def split_text(text: str, limit: int = TEXT_MAX) -> list[str]:
     if current:
         parts.append(current)
     return parts
+
+
+def _top(counts: Counter, defaults: Sequence[str]) -> list[str]:
+    """The six most frequent symptoms in `counts`, padded with `defaults` in their order."""
+    top = sorted(counts, key=lambda s: (-counts[s], SYMPTOMS.index(s)))[:SYMPTOM_BUTTONS]
+    for s in defaults:
+        if len(top) >= SYMPTOM_BUTTONS:
+            break
+        if s not in top:
+            top.append(s)
+    return top
+
+
+def eve_counts(log_: Log, back: Sequence[int]) -> Counter:
+    """How often each symptom was logged `back` days before a start (1 = the day before)."""
+    counts: Counter = Counter()
+    for start in records.starts(log_):
+        for n in back:
+            day = log_.get(start - timedelta(days=n))
+            if day is not None:
+                counts.update(day.symptoms)
+    return counts
+
+
+def eve_starts(log_: Log) -> int:
+    """How many starts have a symptom logged on the day before."""
+    eves = (log_.get(s - timedelta(days=1)) for s in records.starts(log_))
+    return sum(1 for day in eves if day is not None and day.symptoms)
 
 
 def _units(text: str) -> int:

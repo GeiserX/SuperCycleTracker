@@ -85,6 +85,17 @@ def test_check_accepts_the_edges_of_the_bot_day(data):
         assert sct("check", "--data", data)[0] == 0
 
 
+@pytest.mark.parametrize(
+    ("value", "ok"),
+    [("3", True), ("14", True), ("2", False), ("15", False), ("seven", False), ("true", False)],
+)
+def test_check_holds_period_max_day_to_3_through_14(data, value, ok):
+    profile = data / "cycle" / "profile.yaml"
+    profile.write_text(profile.read_text() + f"period_max_day: {value}\n", encoding="utf-8")
+    code, _, err = sct("check", "--data", data)
+    assert (code, err) == ((0, "") if ok else (1, "profile: bad_period_max_day\n"))
+
+
 def test_check_refuses_a_plugin_outside_the_data_dir(data):
     profile = data / "cycle" / "profile.yaml"
     profile.write_text(profile.read_text() + "assistant:\n  plugin: ../x.py\n", encoding="utf-8")

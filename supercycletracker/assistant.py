@@ -283,13 +283,14 @@ def context(
     ask_at: str = "21:00",
     asked: bool = False,
     skipped: Collection[date] = (),
+    period_max_day: int = cycle.PERIOD_MAX_DAY,
 ) -> str:
     """`context.md`, rebuilt every turn: the date, where she is, the prediction, a calendar of
     the last two weeks, her symptoms and the people. Ids and flows stay English; weekdays come
     in both languages so the assistant can resolve «el martes»."""
     local = now.astimezone(ZoneInfo(tz))
     today = cycle.bot_day(now, tz)
-    ph = cycle.phase(log, today, skipped)
+    ph = cycle.phase(log, today, skipped, period_max_day)
     local_names = t("days")
     first_days = [d for d, day in sorted(log.items()) if day.cycle_start and d <= today]
 
@@ -307,6 +308,7 @@ def context(
         out.append(f"The bot asked at {ask_at} about today; {state}")
     else:
         out.append(f"The bot has not asked today (it asks at {ask_at} when a period is due).")
+    out.append(f"During a period it asks every day up to period day {period_max_day}.")
     if ph.missing:
         out.append("Missing days the bot still wants: " + ", ".join(_day(d) for d in ph.missing))
 

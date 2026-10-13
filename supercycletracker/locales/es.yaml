@@ -10,6 +10,7 @@ ask_catchup: "{m}, para cerrar esta regla me falta el {date}. ¿Te acuerdas más
 ask_fix: "{m}, vamos a corregir el {date}. ¿Cómo lo apunto?"
 ask_pain: "{done} ¿Y el dolor? 0 es nada y 10, el peor que conoces."
 ask_symptoms: "{done} ¿Algo más? Marca lo que notes y pulsa «Listo»."
+ask_eve: "{done} ¿Y el día de antes ({date}), por la tarde o por la noche, notaste algo distinto?"
 card_done: "Hecho: {date}, día {n}. {summary}"
 next_today: "Anotado el {date}. Ahora, ¿cómo va hoy, {next}?"
 next_gap: "Anotado el {date}. Ahora, ¿cómo fue el {next}?"
@@ -18,7 +19,7 @@ not_yet: "Vale. Mañana te vuelvo a preguntar."
 skipped: "No pasa nada, dejo el {date} en blanco."
 pick_day: "¿Qué día te bajó?"
 closed: "Cierro esta regla: {days} días, del {start} al {end}. La próxima, hacia el {expected} (entre el {ws} y el {we}). Hasta entonces no te molesto."
-day7: "Llevamos 7 días, así que dejo de preguntarte cada día. Si sigue, cuéntamelo con /hoy cuando quieras; si dura bastante más de lo habitual, merece la pena comentarlo con tu médico."
+day7: "Llevamos {n} días, así que dejo de preguntarte cada día. Si sigue, cuéntamelo con /hoy cuando quieras; si dura bastante más de lo habitual, merece la pena comentarlo con tu médico."
 tell_me: "{m}, cuéntame. Te leo."
 placeholder: "Ej.: poco, dolor 3, hinchada"
 
@@ -52,6 +53,7 @@ summary_lengths: "• Ciclos recientes: {lengths} días (lo normal en ti: {media
 summary_period: "• Duración habitual: {days} días."
 summary_next: "• Próxima: hacia el {expected} (entre el {ws} y el {we})."
 summary_symptoms: "• Lo que más anotas: {items}."
+summary_eve: "• Antes de la regla sueles notar: {items}."
 summary_empty: "Aún no tengo datos suficientes."
 
 # --- /estado -------------------------------------------------------------------------------
@@ -120,6 +122,7 @@ btn_dont_remember: "No me acuerdo"
 btn_tell_more: "Contarte más"
 btn_other: "Otro: escríbemelo"
 btn_done: "Listo"
+btn_nothing: "Nada especial"
 btn_fix: "Corregir"
 btn_back: "Volver"
 
