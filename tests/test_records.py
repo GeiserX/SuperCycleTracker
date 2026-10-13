@@ -71,6 +71,51 @@ def test_unknown_key_on_load_is_refused(tmp_path):
         records.load(path)
 
 
+@pytest.mark.parametrize(
+    "lines, code",
+    [
+        (
+            [
+                '{"date": "2027-01-02", "flow": "light", "source": "admin"}',
+                '{"date": "2027-01-02", "flow": "heavy", "source": "admin"}',
+            ],
+            "duplicate_date",
+        ),
+        (['{"date": "2027-01-02", "flow": "light"}'], "missing_key"),
+        (['{"flow": "light", "source": "admin"}'], "missing_key"),
+    ],
+)
+def test_a_bad_line_on_load_raises_a_reason_code(tmp_path, lines, code):
+    path = tmp_path / "log.jsonl"
+    path.write_text("".join(line + "\n" for line in lines))
+    with pytest.raises(ValueError) as err:
+        records.load(path)
+    assert type(err.value) is ValueError and str(err.value) == code
+
+
+def test_save_is_atomic_when_the_rename_fails(tmp_path, monkeypatch):
+    out = tmp_path / "log.jsonl"
+    records.save(out, records.load(FIXTURE))
+    original = out.read_bytes()
+
+    def boom(src, dst):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(records.os, "replace", boom)
+    with pytest.raises(OSError):
+        records.save(out, mk(("2027-01-01", "heavy")))
+    assert out.read_bytes() == original
+    assert [p.name for p in tmp_path.iterdir()] == ["log.jsonl"]  # the temp file is gone
+
+
+def test_save_leaves_the_file_readable_by_its_owner_only(tmp_path):
+    out = tmp_path / "log.jsonl"
+    out.write_text("")
+    out.chmod(0o644)
+    records.save(out, mk(("2027-01-01", "heavy")))
+    assert out.stat().st_mode & 0o777 == 0o600
+
+
 # --- starts --------------------------------------------------------------------------------
 
 

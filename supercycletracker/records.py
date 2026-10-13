@@ -92,6 +92,8 @@ class Day:
         unknown = set(obj) - set(KEYS)
         if unknown:
             raise ValueError("unknown_key")
+        if "date" not in obj or "source" not in obj:
+            raise ValueError("missing_key")
         symptoms = obj.get("symptoms") or ()
         return cls(
             date=_parse_date(obj["date"]),
@@ -108,7 +110,8 @@ class Day:
 
 
 def load(path: str | Path) -> Log:
-    """Read the log. A missing file is an empty log."""
+    """Read the log. A missing file is an empty log. A bad line raises `ValueError` with a
+    reason code: a repeated date would otherwise be dropped silently by the next `save`."""
     try:
         text = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -117,6 +120,8 @@ def load(path: str | Path) -> Log:
     for line in text.splitlines():
         if line.strip():
             day = Day.from_dict(json.loads(line))
+            if day.date in log:
+                raise ValueError("duplicate_date")
             log[day.date] = day
     return log
 
@@ -126,7 +131,11 @@ def dumps(log: Mapping[date, Day]) -> str:
 
 
 def save(path: str | Path, log: Mapping[date, Day]) -> None:
-    """Write the log atomically: a temp file in the same directory, then `os.replace`."""
+    """Write the log atomically: a temp file in the same directory, then `os.replace`.
+
+    The file ends up mode 0600 (what `mkstemp` creates) on purpose: it is health data, and only
+    the bot's own user needs to read it.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".log.", suffix=".tmp", dir=path.parent)
