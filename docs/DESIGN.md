@@ -761,8 +761,9 @@ pyproject.toml       name supercycletracker, requires-python >=3.12, deps [pyyam
                      script sct
 uv.lock  .dockerignore
 .github/workflows/ci.yml             ubuntu-latest, uv, ruff check, ruff format --check, pytest
-.github/workflows/docker-publish.yml on tags v*: tag must match __version__; buildx amd64+arm64;
-                                     drumsergio/supercycletracker:<version>
+.github/workflows/docker-publish.yml on push to main: when v<__version__> is not tagged yet,
+                                     buildx amd64+arm64 drumsergio/supercycletracker:<version>,
+                                     then tag the commit v<version>
 README.md  AGENTS.md
 ```
 
@@ -814,6 +815,20 @@ people. Nothing in the public image or repository ever names a person, a chat, a
 tmpfs on `/tmp`, the data directory mounted at `/data` owned by uid 1000. Only one container may poll a
 bot token (Telegram answers 409 to a second one). `sct say` does not poll, so it is safe beside the
 running bot.
+
+**Release.** The image is published from `main`, never from a hand-made tag. On every push to `main`
+the `Docker` workflow reads `__version__` from `supercycletracker/__init__.py` (it must be `X.Y.Z`).
+When the tag `v<version>` does not exist yet, it builds and pushes
+`drumsergio/supercycletracker:<version>` for amd64 and arm64, then creates the tag `v<version>` on
+that commit with the workflow's own token. When the tag exists, the run does nothing. So a release
+is one merged change that bumps `__version__` (`pyproject.toml` reads it from there); a change that
+keeps the version ships nothing. The tag is an output: pushing one by hand publishes nothing (and
+makes the workflow skip that version), and a tag created by the workflow's token starts no other
+workflow. Runs are serialized and queued in order (`queue: max`), so two quick merges never build
+the same version twice and a version bump waiting behind a running build is never dropped. If the
+image push succeeds and the tagging step fails, re-running the workflow rebuilds the same version
+and tags it. A deployment that pins the image by version (a dependency bot watching the registry) picks up
+the new tag on its own.
 
 ## 15. Left out on purpose
 
