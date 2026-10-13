@@ -88,21 +88,40 @@ class Day:
         return json.dumps(self.to_dict(), ensure_ascii=False)
 
     @classmethod
-    def from_dict(cls, obj: Mapping) -> Day:
-        unknown = set(obj) - set(KEYS)
-        if unknown:
+    def from_dict(cls, obj: object) -> Day:
+        """One line of the log, checked field by field. Anything malformed raises `ValueError`
+        with a reason code, never the value: this is the single gate for lines a person may have
+        edited by hand."""
+        if not isinstance(obj, Mapping):
+            raise ValueError("bad_line")  # noqa: TRY004 - bad data, one exception type
+        if set(obj) - set(KEYS):
             raise ValueError("unknown_key")
         if "date" not in obj or "source" not in obj:
             raise ValueError("missing_key")
-        symptoms = obj.get("symptoms") or ()
+        source, flow, pain = obj["source"], obj.get("flow"), obj.get("pain")
+        symptoms, note = obj.get("symptoms") or [], obj.get("note")
+        if not isinstance(source, str):
+            raise ValueError("bad_source")  # noqa: TRY004
+        if flow is not None and flow not in FLOWS:
+            raise ValueError("unknown_flow")
+        if pain is not None and (type(pain) is not int or not 0 <= pain <= 10):
+            raise ValueError("bad_pain")
+        if not isinstance(symptoms, list) or not all(isinstance(x, str) for x in symptoms):
+            raise ValueError("bad_symptoms")
+        if any(x not in SYMPTOMS for x in symptoms):
+            raise ValueError("unknown_symptom")
+        if note is not None and not isinstance(note, str):
+            raise ValueError("bad_note")
+        if not isinstance(obj.get("cycle_start", False), bool):
+            raise ValueError("bad_cycle_start")  # noqa: TRY004
         return cls(
             date=_parse_date(obj["date"]),
-            source=str(obj["source"]),
-            flow=obj.get("flow"),
+            source=source,
+            flow=flow,
             cycle_start=obj.get("cycle_start") is True,
-            pain=obj.get("pain"),
+            pain=pain,
             symptoms=tuple(sorted(set(symptoms))),
-            note=obj.get("note") or None,
+            note=note or None,
         )
 
 
@@ -111,7 +130,8 @@ class Day:
 
 def load(path: str | Path) -> Log:
     """Read the log. A missing file is an empty log. A bad line raises `ValueError` with a
-    reason code: a repeated date would otherwise be dropped silently by the next `save`."""
+    reason code (never the line): a repeated date would otherwise be dropped silently by the
+    next `save`, and a wrongly typed field would break every reader after it."""
     try:
         text = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -124,7 +144,11 @@ def loads(text: str) -> Log:
     log: Log = {}
     for line in text.splitlines():
         if line.strip():
-            day = Day.from_dict(json.loads(line))
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                raise ValueError("bad_json") from None  # json's message quotes the line
+            day = Day.from_dict(obj)
             if day.date in log:
                 raise ValueError("duplicate_date")
             log[day.date] = day
@@ -353,4 +377,7 @@ def _check_source(source: str) -> None:
 def _parse_date(raw: object) -> date:
     if not isinstance(raw, str) or not _DATE.match(raw):
         raise ValueError("bad_date")
-    return date.fromisoformat(raw)
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        raise ValueError("bad_date") from None  # fromisoformat's message quotes the date
