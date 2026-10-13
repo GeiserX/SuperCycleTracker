@@ -1,7 +1,9 @@
+import logging
 import os
 import stat
 import subprocess
 import threading
+from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -51,6 +53,18 @@ def human_profile(dr, text):
     git(dr.human, "push", "--quiet")
 
 
+def human_raw(dr, text, message="edit by hand"):
+    """A person replaces the log's text as is, valid or not, and pushes."""
+    git(dr.human, "pull", "--quiet")
+    (dr.human / LOG_FILE).write_text(text, encoding="utf-8")
+    git(dr.human, "commit", "--quiet", "-am", message)
+    git(dr.human, "push", "--quiet")
+
+
+def rebasing(path) -> bool:
+    return "rebase in progress" in git(path, "status")
+
+
 # --- commit and push -----------------------------------------------------------------------
 
 
@@ -80,6 +94,21 @@ def test_a_tap_that_changes_nothing_writes_nothing(data_repo):
     assert repo.flush(force=True) == "pushed"
     assert not tap(repo, flow="medium")
     assert git(data_repo.data, "status", "--porcelain") == ""
+
+
+def test_write_rederives_starts_whatever_fn_returns(data_repo):
+    repo = Repo(data_repo.data, clock=Clock())
+    stale_day = date(2027, 2, 1)
+
+    def stale(log):  # a Change built by hand, with one start flag dropped
+        after = dict(log)
+        after[stale_day] = replace(after[stale_day], cycle_start=False)
+        return records.Change(before=log, after=after, items=())
+
+    change = repo.write(stale)
+    assert change.after[stale_day].cycle_start
+    assert records.load(data_repo.log)[stale_day].cycle_start
+    assert git(data_repo.data, "status", "--porcelain") == ""  # nothing really changed
 
 
 def test_sigterm_flush_commits_at_once(data_repo):
@@ -125,6 +154,99 @@ def test_a_conflicting_line_resolves_to_the_bots_and_other_edits_survive(data_re
     assert repo.unpushed() == 0
 
 
+def test_a_persons_edit_to_the_next_day_is_in_the_bots_hunk_and_goes(data_repo):
+    """git resolves `-X theirs` by hunk: adjacent lines are one hunk, so the bot's side wins for
+    the person's edit on the neighbouring day too. Deliberate: the bot is the log's only writer
+    by rule, and the hand edit is still in the remote's history."""
+    dr, clock = data_repo, Clock()
+    repo = Repo(dr.data, clock=clock)
+    first, second = date(2027, 1, 4), date(2027, 1, 5)
+    tap(repo, d=first, pain=5)
+
+    def by_hand(log):
+        return {**log, second: replace(log[second], pain=2)}
+
+    human_edit(dr, by_hand)
+    clock.advance(61)
+    assert repo.flush() == "pushed"
+    remote = records.loads(dr.remote_file(LOG_FILE))
+    assert remote[first].pain == 5
+    assert remote[second].pain is None
+
+
+def test_the_bots_commit_holds_the_log_only(data_repo):
+    dr = data_repo
+    repo = Repo(dr.data, clock=Clock())
+    profile = dr.data / "cycle" / "profile.yaml"
+    profile.write_text("name: Example\nlanguage: en\n", encoding="utf-8")
+    git(dr.data, "add", "cycle/profile.yaml")  # a person left a change staged in the checkout
+    tap(repo, flow="medium")
+    assert repo.flush(force=True) == "pushed"
+    assert git(dr.data, "show", "--name-only", "--format=", "HEAD").split() == [LOG_FILE]
+    assert "language: es" in dr.remote_file("cycle/profile.yaml")
+    assert profile.read_text() == "name: Example\nlanguage: en\n"  # their edit is still there
+
+
+def test_a_persons_uncommitted_edit_in_the_checkout_survives_the_pull(data_repo):
+    """`--autostash`: without it the pull refuses a dirty tracked file and every flush fails."""
+    dr = data_repo
+    repo = Repo(dr.data, clock=Clock())
+    (dr.data / "cycle" / "profile.yaml").write_text("name: Example\nlanguage: en\n")
+    (dr.human / "README.md").write_text("notes\n")  # meanwhile the remote moves on
+    git(dr.human, "add", "README.md")
+    git(dr.human, "commit", "--quiet", "-m", "readme")
+    git(dr.human, "push", "--quiet")
+    tap(repo, flow="medium")
+    assert repo.flush(force=True) == "pushed"
+    assert dr.remote_file("README.md") == "notes\n"
+    assert (dr.data / "cycle" / "profile.yaml").read_text() == "name: Example\nlanguage: en\n"
+
+
+def test_a_deleted_log_on_the_remote_fails_as_a_conflict_and_keeps_the_commit(data_repo):
+    """modify/delete is a conflict `-X theirs` cannot settle: the rebase is aborted, the bot's
+    commit stays, and every try reports `pull_conflict` until a person restores the file."""
+    dr, clock = data_repo, Clock()
+    repo = Repo(dr.data, clock=clock)
+    tap(repo, flow="heavy")
+    git(dr.human, "pull", "--quiet")
+    git(dr.human, "rm", "--quiet", LOG_FILE)
+    git(dr.human, "commit", "--quiet", "-m", "remove the log")
+    git(dr.human, "push", "--quiet")
+
+    assert repo.flush(force=True) == "failed"
+    assert repo.last_error == "pull_conflict"
+    assert not rebasing(dr.data)
+    assert repo.unpushed() == 1
+    assert subject(dr.data) == "log: 2027-03-04"
+    assert records.load(dr.log)[DAY].flow == "heavy"
+    clock.advance(61)
+    assert repo.flush() == "failed" and repo.last_error == "pull_conflict"  # stays visible
+
+
+def test_a_pull_killed_by_the_timeout_is_aborted(data_repo, monkeypatch):
+    dr = data_repo
+    repo = Repo(dr.data, clock=Clock())
+    tap(repo, flow="heavy")
+    git(dr.human, "pull", "--quiet")
+    git(dr.human, "rm", "--quiet", LOG_FILE)
+    git(dr.human, "commit", "--quiet", "-m", "remove the log")
+    git(dr.human, "push", "--quiet")
+    real = repo._git
+
+    def slow_pull(*args):
+        r = real(*args)
+        if args[0] == "pull":  # the pull ran and stopped mid-rebase, then the timeout hit
+            assert rebasing(dr.data)
+            raise subprocess.TimeoutExpired(["git", "pull"], 60)
+        return r
+
+    monkeypatch.setattr(repo, "_git", slow_pull)
+    assert repo.flush(force=True) == "failed"
+    assert repo.last_error == "TimeoutExpired"
+    assert not rebasing(dr.data)
+    assert repo.unpushed() == 1
+
+
 def test_starts_are_rederived_after_a_pull_that_changed_the_log(data_repo):
     dr = data_repo
     repo = Repo(dr.data, clock=Clock())
@@ -141,8 +263,36 @@ def test_starts_are_rederived_after_a_pull_that_changed_the_log(data_repo):
     assert repo.flush() == "pulled"
     log = records.load(dr.log)
     assert log[date(2027, 1, 27)].cycle_start and not log[date(2027, 2, 1)].cycle_start
-    assert repo.flush() == "pushed"  # the re-derived flags are committed at once
-    assert subject(dr.remote, "main") == "log: 2027-01-27, 2027-02-01"
+    assert subject(dr.data) == "derive: 2027-01-27, 2027-02-01"  # committed in the pull
+    assert git(dr.data, "status", "--porcelain") == ""
+    assert repo.flush() == "pushed"
+    assert subject(dr.remote, "main") == "derive: 2027-01-27, 2027-02-01"
+    # A re-derive is not a check-in: /deshacer leaves it, and the flags, alone.
+    assert repo.undo() is None
+    assert records.derive_starts(records.load(dr.log)) == records.load(dr.log)
+
+
+def test_a_malformed_line_pulled_from_the_remote_is_logged_and_writes_refuse(data_repo, caplog):
+    dr, clock = data_repo, Clock()
+    repo = Repo(dr.data, clock=clock)
+    good = dr.log.read_text(encoding="utf-8")
+    planted = '{"date": "2027-03-09", "flow": "plantedword", "source": "admin"}\n'
+    for bad, code in (("5\n", "bad_line"), (planted, "unknown_flow"), ("{not json}\n", "bad_json")):
+        human_raw(dr, good + bad)
+        caplog.clear()
+        clock.advance(3600)
+        with caplog.at_level(logging.DEBUG):
+            assert repo.flush() == "pulled"
+        assert code in caplog.text and "plantedword" not in caplog.text
+        with pytest.raises(ValueError, match=f"^{code}$"):
+            tap(repo, flow="light")
+        assert repo.undo() is None  # HEAD is the person's commit
+        human_raw(dr, good, "fix by hand")
+        clock.advance(59)
+        assert repo.flush() == "idle"
+        clock.advance(1)  # while the log is unreadable, the next pull is a minute away
+        assert repo.flush() == "pulled"
+    assert tap(repo, flow="light")  # fixed on the remote, the bot writes again
 
 
 def test_pulls_once_an_hour_when_clean(data_repo):
@@ -285,6 +435,26 @@ def test_the_token_never_lands_in_git_config(data_repo):
         check=False,
     )
     assert header.stdout.strip() == f"Authorization: token {TOKEN}"
+
+
+def test_the_token_is_never_on_a_git_command_line(data_repo, monkeypatch):
+    calls = []
+    real = subprocess.run
+
+    def spy(argv, **kw):
+        calls.append((argv, kw.get("env") or {}))
+        return real(argv, **kw)
+
+    repo = Repo(data_repo.data, token=TOKEN, clock=Clock())
+    tap(repo, flow="light")
+    monkeypatch.setattr(subprocess, "run", spy)
+    assert repo.check_remote()
+    assert repo.flush(force=True) == "pushed"
+    monkeypatch.undo()
+    assert len(calls) >= 5
+    for argv, env in calls:
+        assert not any(TOKEN in arg for arg in argv), argv
+        assert f"Authorization: token {TOKEN}" in env.values()
 
 
 def test_git_env_appends_to_existing_config_entries(monkeypatch):

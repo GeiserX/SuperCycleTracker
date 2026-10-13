@@ -17,6 +17,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -31,13 +32,14 @@ STATE_DB = "state/sct.sqlite"
 
 QUIET_S = 60  # commit once the newest write is this old: a three-tap check-in is one commit
 PULL_EVERY_S = 3600  # with nothing to push, pull this often so profile and plugin edits arrive
-RETRY_S = 60  # after a failed git step, wait this long before the next try
+RETRY_S = 60  # after a failed git step, wait this long: a hung remote must not hold the lock
 GIT_TIMEOUT_S = 60
 
 BOT_NAME = "SuperCycleTracker"
 BOT_EMAIL = "supercycletracker@localhost"
 LOG_PREFIX = "log: "
 UNDO_PREFIX = "undo: "
+DERIVE_PREFIX = "derive: "  # flags moved by a pull; not a check-in, so never undone
 
 
 # --- SQLite kv -----------------------------------------------------------------------------
@@ -188,13 +190,19 @@ class Repo:
             return records.load(self.log_path)
 
     def write(self, fn: Callable[[Log], Change]) -> Change:
-        """Load, let `fn` build the `Change`, save the result atomically. A `Change` that leaves
-        the log as it was writes nothing."""
+        """Load, let `fn` build the `Change`, re-derive the starts, save atomically. A `Change`
+        that leaves the log as it was writes nothing.
+
+        A log that does not parse (a bad hand edit pulled from the remote) raises `ValueError`
+        with a reason code and nothing is written; the caller answers with a toast."""
         with DATA_LOCK:
             before = records.load(self.log_path)
             change = fn(before)
-            if dict(change.after) != before:
-                records.save(self.log_path, change.after)
+            after = records.derive_starts(change.after)
+            if after != dict(change.after):
+                change = replace(change, after=after)
+            if after != before:
+                records.save(self.log_path, after)
                 self._last_write = self.clock()
             return change
 
@@ -224,6 +232,16 @@ class Repo:
     def _dirty(self) -> bool:
         return bool(self._run("status", "--porcelain", "--", LOG_FILE, code="status_failed"))
 
+    def _commit(self, message: str) -> None:
+        """Commit the log and only the log, whatever else a person left staged."""
+        self._run("commit", "--quiet", "-m", message, "--", LOG_FILE, code="commit_failed")
+
+    def _abort_rebase(self) -> None:
+        try:
+            self._git("rebase", "--abort")  # fails harmlessly when no rebase is in progress
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
     def _read(self) -> bytes | None:
         try:
             return self.log_path.read_bytes()
@@ -249,7 +267,11 @@ class Repo:
     def flush(self, force: bool = False) -> str:
         """Commit the log after 60 s of quiet (at once with `force`, on SIGTERM), then pull
         with rebase and push. With nothing to push, pull once an hour. Returns the event kind:
-        `waiting`, `pushed`, `pulled`, `idle`, `backoff` or `failed`."""
+        `waiting`, `pushed`, `pulled`, `idle`, `backoff` or `failed`.
+
+        A failure keeps the commit, sets `last_error` to a reason code and backs off for
+        `RETRY_S` (`backoff`), so a hung remote does not hold `DATA_LOCK` on every tick;
+        `force` ignores the backoff."""
         with DATA_LOCK:
             now = self.clock()
             if not force and self._retry_at is not None and now < self._retry_at:
@@ -289,36 +311,52 @@ class Repo:
         except ValueError:
             dates = []
         self._run("add", "--", LOG_FILE, code="add_failed")
-        self._run("commit", "--quiet", "-m", LOG_PREFIX + _dates_text(dates), code="commit_failed")
+        self._commit(LOG_PREFIX + _dates_text(dates))
         self._last_write = None
         log.info("git commit ok days=%d", len(dates))
 
     def _pull(self) -> None:
         """`pull --rebase -X theirs`: in a rebase "theirs" is the commit being replayed, the
-        bot's, so a conflicting hunk in the log resolves to the bot's line and a person's other
-        edits survive. Any other failure aborts the rebase and keeps the bot's commit."""
+        bot's, so a conflicting hunk in the log resolves to the bot's side. git resolves by
+        hunk, not by line, so a person's edit to a day right next to one the bot changed is in
+        the same hunk and goes too; edits further away survive.
+
+        `--autostash` covers a person's uncommitted edit to another tracked file in the
+        checkout (the log itself is never dirty here: `_flush` commits it or waits first).
+
+        A failure aborts the rebase and keeps the bot's commit. A conflict `-X theirs` cannot
+        settle (a person deleted the log while the bot had a commit to push) fails as
+        `pull_conflict` on every try until a person restores the file on the remote."""
         before = self._read()
-        r = self._git("pull", "--rebase", "-X", "theirs", "--autostash", "--quiet")
+        try:
+            r = self._git("pull", "--rebase", "-X", "theirs", "--autostash", "--quiet")
+        except subprocess.TimeoutExpired:
+            self._abort_rebase()  # killed mid-rebase would leave HEAD detached
+            raise
         self._last_pull = self.clock()
         if r.returncode != 0:
-            self._git("rebase", "--abort")
-            raise GitError("pull_failed")
+            conflict = self._git("diff", "--name-only", "--diff-filter=U").stdout.strip()
+            self._abort_rebase()
+            raise GitError("pull_conflict" if conflict else "pull_failed")
         if self._read() != before:
             self._rederive()
         log.info("git pull ok")
 
     def _rederive(self) -> None:
-        """After a pull that changed the file: re-run the 10-day rule; if a flag moves, the
-        file is left dirty and the next flush commits it."""
+        """After a pull that changed the file: re-run the 10-day rule and, if a flag moves,
+        commit it at once as `derive: <dates>`, which is not a check-in, so /deshacer leaves it
+        alone. A log that does not parse is logged with its reason code and left as it is;
+        writes refuse it, so the next pull, with a person's fix, comes in `RETRY_S`, not an hour."""
         try:
             current = records.load(self.log_path)
         except ValueError as e:
             log.warning("log unreadable after pull: %s", e)
+            self._last_pull = self.clock() - PULL_EVERY_S + RETRY_S
             return
         derived = records.derive_starts(current)
         if derived != current:
             records.save(self.log_path, derived)
-            self._last_write = None
+            self._commit(DERIVE_PREFIX + _dates_text(_changed(current, derived)))
             log.info("starts re-derived after pull")
 
     # --- undo ----------------------------------------------------------------------------
@@ -348,7 +386,7 @@ class Repo:
             else:
                 self._run("rm", "--quiet", "--", LOG_FILE, code="rm_failed")
             if message is not None:
-                self._run("commit", "--quiet", "-m", message, code="commit_failed")
+                self._commit(message)
             self._last_write = None
             log.info("undo %s", "committed" if message else "restored")
             try:
