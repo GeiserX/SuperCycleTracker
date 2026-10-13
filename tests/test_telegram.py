@@ -219,3 +219,52 @@ def test_safe_check_can_fail():
         hidden = e
     with pytest.raises(AssertionError):
         assert_clean(hidden)
+
+
+class FakeFile:
+    """urlopen for downloads: hands back `body` or raises, and records each request."""
+
+    def __init__(self, answer):
+        self.answer = answer
+        self.requests = []
+
+    def __call__(self, request, timeout):
+        self.requests.append((request, timeout))
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        return Response(self.answer)
+
+
+def test_download_reads_the_file_url():
+    http = FakeFile(b"OggS audio")
+    tg = Telegram(TOKEN, urlopen=http)
+    assert tg.download("voice/file_7.oga") == b"OggS audio"
+    request, _ = http.requests[0]
+    assert request.full_url == f"https://api.telegram.org/file/bot{TOKEN}/voice/file_7.oga"
+    assert request.get_method() == "GET"
+
+
+def test_download_refuses_a_file_over_the_limit_without_reading_it_all():
+    tg = Telegram(TOKEN, urlopen=FakeFile(b"x" * 11))
+    with pytest.raises(TelegramError) as info:
+        tg.download("voice/f.oga", limit=10)
+    assert info.value.code == 413
+    assert Telegram(TOKEN, urlopen=FakeFile(b"x" * 10)).download("voice/f.oga", limit=10)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        urllib.error.HTTPError(
+            f"https://api.telegram.org/file/bot{TOKEN}/v.oga", 404, "Not Found", {}, io.BytesIO()
+        ),
+        urllib.error.URLError(f"cannot reach https://api.telegram.org/file/bot{TOKEN}/v.oga"),
+        TimeoutError(f"timed out on https://api.telegram.org/file/bot{TOKEN}/v.oga"),
+    ],
+)
+def test_download_errors_never_hold_the_token(answer):
+    tg = Telegram(TOKEN, urlopen=FakeFile(answer))
+    with pytest.raises(TelegramError) as info:
+        tg.download("v.oga")
+    assert info.value.method == "download"
+    assert_clean(info.value)

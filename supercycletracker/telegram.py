@@ -19,6 +19,7 @@ API = "https://api.telegram.org"
 RETRIES_429 = 2  # a 429 is retried this many times, after Telegram's own retry_after
 MAX_RETRY_AFTER = 60
 HTTP_MARGIN_S = 15  # on top of a long poll's own timeout
+DOWNLOAD_TIMEOUT_S = 60  # a file download (a voice note): at most 20 MiB from Telegram
 
 _TOKEN = re.compile(r"\d{3,}:[A-Za-z0-9_-]{20,}")
 
@@ -68,6 +69,7 @@ class Telegram:
         sleep: Callable[[float], None] = time.sleep,
     ):
         self._url = f"{base}/bot{token.strip()}/"  # a secrets file often ends in a newline
+        self._file_url = f"{base}/file/bot{token.strip()}/"
         self._urlopen = urlopen
         self._sleep = sleep
 
@@ -96,6 +98,27 @@ class Telegram:
                 continue
             raise err
         raise AssertionError("unreachable")  # pragma: no cover
+
+    def download(self, file_path: str, limit: int | None = None) -> bytes:
+        """The bytes of a file `getFile` returned, from Telegram's file URL (the token is in it,
+        so its errors carry no URL, like `call`). More than `limit` bytes raises
+        `TelegramError("download", 413, "file too large")` without reading the rest."""
+        failure, status = None, 0
+        try:
+            request = urllib.request.Request(self._file_url + file_path)
+            with self._urlopen(request, timeout=DOWNLOAD_TIMEOUT_S) as response:
+                raw = response.read() if limit is None else response.read(limit + 1)
+        except urllib.error.HTTPError as e:
+            status = e.code
+            e.close()
+            failure = f"HTTP {status}"
+        except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as e:
+            failure = type(e).__name__  # ValueError: a malformed URL, quoted in full
+        if failure is not None:
+            raise TelegramError("download", status, failure)
+        if limit is not None and len(raw) > limit:
+            raise TelegramError("download", 413, "file too large")
+        return raw
 
     def _post(self, method: str, body: bytes, timeout: float) -> dict:
         """The response body as a dict. A body that is not a JSON object (an HTML page from a
