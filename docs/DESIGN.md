@@ -513,6 +513,7 @@ Friday (viernes) 2025-03-14, 21:14 Europe/Madrid. Bot day 2025-03-14 (a day ends
 
 # Where she is
 Period day 3 (started Wednesday 2025-03-12). The bot asked at 21:00 about today; not answered yet.
+During a period it asks every day up to period day 7.
 Missing days the bot still wants: Thursday 2025-03-13.
 
 # Prediction (last 6 cycles)
