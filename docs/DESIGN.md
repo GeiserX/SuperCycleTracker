@@ -1,0 +1,832 @@
+# SuperCycleTracker: design
+
+SuperCycleTracker is a menstrual cycle tracker that lives in a Telegram group. It asks on the days a
+period is likely, logs flow, pain and symptoms from buttons or from a plain reply, learns the cycle to
+predict the next one, and keeps every record in a private git repository the household owns.
+
+Everything in this document is generic. The person, chat, ids and dates are fictional ("Lucía", chat
+`-100123`, user `111`, admin `222`). The AI side is "the assistant plugin": one Python file in the data
+repository that the app loads and calls; the app never knows which provider sits behind it.
+
+## 1. The one idea
+
+**The bot's state is a function of the log and the date.** `cycle/log.jsonl` plus "today" gives the
+phase (waiting, late, period day N, quiet), the missing days and the prediction. Nothing else is
+stored about the cycle, with one exception: a day she answered «No me acuerdo» is never asked about
+again, and that mark (`skip:<date>`) lives in SQLite. A back-dated entry, a hand edit on the git host,
+an import or a restart can never leave the bot in a state the log does not explain.
+
+What is stored outside the log is bot plumbing in SQLite (`<data>/state/sct.sqlite`, git-ignored):
+the Telegram update offset, the day of the last scheduled ask, the assistant conversation id per chat,
+the messages the assistant has not seen yet (her words, in clear), and the skipped days. Losing that
+file costs at most one unanswered message and one repeated question.
+
+Two ways in, one truth:
+
+- **Buttons.** Every scheduled question is a card with inline buttons. A tap is recorded at once, with
+  no AI. Each button carries its date and value, so a tap on yesterday's card still records yesterday,
+  twice the same tap changes nothing, and a restart mid-card loses nothing.
+- **Words.** A reply to any bot message ("ayer poco y hoy nada", "me bajó el martes", "¿es normal que me
+  duela tanto?") goes to the assistant plugin. The assistant answers and may end its answer with a
+  structured record block. **The app, not the assistant, validates and applies the block**, and the app
+  writes the "Noted:" confirmation from what it actually saved, so the assistant can never claim a save
+  that did not happen.
+
+The bot runs as one process: a `getUpdates` long poll with a `tick()` between polls, plus one worker
+thread for assistant turns so a tap is answered while the assistant thinks. Standard library only, with
+PyYAML for the profile and the locale files.
+
+## 2. Records
+
+### 2.1 `cycle/log.jsonl`
+
+One JSON object per line, one line per date, sorted by date, written with `json.dumps(obj,
+ensure_ascii=False)` and a fixed key order (`date, flow, cycle_start, pain, symptoms, note, source`).
+Untouched lines stay byte-identical across writes, so a diff is one line per changed day.
+
+```json
+{"date": "2025-03-12", "flow": "medium", "cycle_start": true, "pain": 4, "symptoms": ["abdominal_cramps"], "note": "me ha pillado en el trabajo", "source": "telegram"}
+```
+
+| key | type | rule |
+|---|---|---|
+| `date` | `YYYY-MM-DD` | required, unique per file; a local date in the profile timezone |
+| `flow` | `none` \| `unspecified` \| `light` \| `medium` \| `heavy` | optional (a symptom-only day has none). `none` means "no bleeding that day" and is how "it stopped" is recorded; it is Apple Health's own value 5. `unspecified` means bleeding, amount not given |
+| `cycle_start` | `true` | present only on day 1. **Derived** by the 10-day rule after every write, never accepted from input |
+| `pain` | int 0..10 | optional |
+| `symptoms` | sorted unique list of ids from `SYMPTOMS` | optional |
+| `note` | string, at most 500 chars | optional; her own words worth keeping |
+| `source` | `telegram` \| `admin` \| `apple-health-export-YYYY-MM-DD` | required; the last writer. A write from the chat replaces an import tag |
+
+**A bleed day** has `flow` in `{unspecified, light, medium, heavy}`. `none` is not a bleed day, and a
+day without `flow` is not either.
+
+**A start** is a bleed day with no bleed day in the 10 days before it (`[d-10, d-1]`). `derive_starts`
+recomputes every `cycle_start` over the whole file on every write. A log seeded from an Apple Health
+export keeps the flags the export had because the rule is the same one.
+
+`SYMPTOMS` is a closed list of English ids; the locale gives the labels. Each one maps to an Apple
+Health category type where one exists:
+
+| id | Apple Health type | id | Apple Health type |
+|---|---|---|---|
+| `abdominal_cramps` | AbdominalCramps | `fatigue` | Fatigue |
+| `bloating` | Bloating | `mood_changes` | MoodChanges |
+| `headache` | Headache | `acne` | Acne |
+| `lower_back_pain` | LowerBackPain | `sleep_changes` | SleepChanges |
+| `pelvic_pain` | PelvicPain | `appetite_changes` | AppetiteChanges |
+| `breast_pain` | BreastPain | `clots` | (none) |
+| `nausea` | Nausea | `spotting` | IntermenstrualBleeding |
+| `diarrhea` | Diarrhea | | |
+| `constipation` | Constipation | | |
+
+`spotting` is a symptom on purpose, never a flow: a little bleeding mid-cycle must not count as a cycle
+start under the 10-day rule. The assistant's rules say so, and the Apple Health importer maps
+`IntermenstrualBleeding` to it.
+
+### 2.2 Writing
+
+Every write goes through one function under one lock: load the file, apply, re-derive starts, write a
+temp file, `os.replace`. The file on the volume is the truth the moment a tap is answered; git is
+synced afterwards (section 8). A write returns a `Change`: for each touched date, the line before and
+the line after. That is what the confirmation text and the undo are built from.
+
+**Field semantics are replace-field.** A field given replaces that field for that day; a field left out
+is unchanged. To add a symptom you send the day's whole list. To remove a day entirely you delete it.
+There is no merging logic to reason about.
+
+**Undo is git.** A check-in is several writes (flow, pain, each symptom toggle) but one commit, because
+`flush()` commits after 60 s of quiet (section 8), so the undo unit is the commit, not the write:
+
+- While `cycle/log.jsonl` is dirty, `/deshacer` restores it from `HEAD` (`git checkout HEAD --
+  cycle/log.jsonl`): the whole uncommitted batch goes, nothing is committed.
+- When it is clean and `HEAD` is a `log: <dates>` commit by the bot, `/deshacer` restores the file
+  from `HEAD~1` and commits `undo: <dates>`.
+- Otherwise («undo:» on top, a person's commit on top, nothing to restore): «No hay nada que deshacer.»
+
+The reply lists the dates that went back. One check-in = one commit = one undo, and no second copy of
+the state. «Corregir» is not an undo: it reopens the flow step for that date and replaces fields.
+
+## 3. Cycle logic (`cycle.py`, pure functions, `today` passed in)
+
+### 3.1 Bot day
+
+`bot_day(now) = (now in the profile timezone - 5 hours).date()`. A reply at 00:30 to the 21:00 card
+belongs to the day that was asked about, and "hoy" in the assistant's context still means that day.
+`ask_at` must fall in `[05:00, 24:00)`; `sct check` refuses anything else. Daylight-saving changes
+happen at 02:00/03:00, so every ask hour exists on every day. The ask moment of bot day `T` is the
+datetime `ask_dt = combine(T, ask_at)` in the profile timezone, which for a late `ask_at` may be
+compared against a wall clock already past midnight (3.3).
+
+### 3.2 Prediction
+
+```
+starts  = derive_starts(log)
+lengths = differences between consecutive starts, keeping only 20 <= L <= 45
+          (shorter is almost always spotting logged as flow, longer a month that was not logged)
+recent  = last 6 of lengths
+expected    = last_start + round(median(recent))
+window      = [last_start + min(recent), last_start + max(recent)], widened to at least expected ± 2
+fewer than 3 usable lengths: median 28, window expected ± 3
+period_days = median run length over runs of 3 or more consecutive logged bleed days, default 5
+```
+
+Recomputed on every read; the log is a few kilobytes. With no start at all there is no prediction: the
+bot never asks on a schedule and only answers what she sends.
+
+### 3.3 Phase
+
+```python
+@dataclass(frozen=True)
+class Phase:
+    kind: str  # no_history | quiet | waiting | late | period
+    day: int | None  # period day, 1-based
+    start: date | None  # the latest start on or before today
+    missing: tuple[date, ...]  # period days the bot still wants, oldest first
+    prediction: Prediction | None
+```
+
+For bot day `T`, latest start `S <= T`, `n = T - S + 1`:
+
+- **open period**: `S` exists, the latest record dated in `[S, T]` that has a `flow` is a bleed day (a
+  `none` closes it; a bleed day after a `none` reopens it), and `n <= 7`, or `n == 8` with missing days
+  (the catch-up day: the bot asks for the gaps once more, never for day 8 itself).
+- **missing**: dates in `[max(S, T-3), T-1]` with no `flow`, not marked "no me acuerdo", and before the
+  closing `none` if there is one. Days older than three are never nagged about, but they are still
+  accepted when she reports them.
+
+| kind | when | the scheduled ask |
+|---|---|---|
+| `no_history` | no start in the log | nothing |
+| `period` | open period | the check-in card: missing days first (at most 3), then today, unless today already has a flow and nothing is missing. On day 8 only the missing days, with the `ask_catchup` wording and «No me acuerdo» |
+| `waiting` | no open period, `window_start <= T <= window_end` | «¿Te ha bajado ya?» card, unless today has a flow |
+| `late` | no open period, `T > window_end` | the same card with neutral wording, every day, no cap |
+| `quiet` | everything else | nothing |
+
+Rules across phases:
+
+- **One scheduled ask per bot day.** With `ask_dt = combine(T, ask_at)` in the profile timezone, the
+  card goes on the first tick with `ask_dt <= now < ask_dt + 2 h` and the SQLite key `last_ask != T`.
+  A bot that was down at 21:00 still asks at 22:30, never at 03:00; with `ask_at` 23:00 a bot back at
+  00:30 still asks, because `T` is still yesterday's bot day and `ask_dt + 2 h` is 01:00.
+- **Spontaneous reports in every phase.** A start reported early opens `period` at once. A start
+  back-dated four days opens `period` on day 5 with the gaps queued.
+- **Day-7 limit.** On day 7 the card's done step says the bot stops asking daily; reports are still
+  accepted. The assistant's rules raise bleeding past 7 days kindly if she writes.
+- **Closing.** A write whose `Change` turns an open period into a closed one (phase computed before and
+  after the write) posts the closing line with the new prediction. No flag is stored: the transition
+  is in the `Change`, so a close that is undone and redone posts again, which is right.
+- **Deterministic red flag.** A write whose `Change` takes a day's pain from below 8 (or unset) to 8 or
+  more posts the `pain_high` line, from a button, `/anotar` or a record block alike. Once per crossing,
+  no judgement needed, and it works with the assistant down.
+
+## 4. What she sees
+
+### 4.1 The cards
+
+A card is one bot message with an inline keyboard bound to one date. The steps happen by editing the
+same message, so the group stays clean. Every tap is recorded at once, then `answerCallbackQuery`, then
+`editMessageText` (a 400 "message is not modified" is ignored; any other edit failure sends a new
+message instead).
+
+**Waiting or late (window open, no period):**
+
+```
+Lucía, por tus últimos ciclos la regla podría llegarte estos días. ¿Te ha bajado ya?
+[Sí, poco] [Sí, normal] [Sí, mucho]
+[Sí, otro día] [Todavía no]
+[Contarte más]
+```
+
+- «Todavía no»: the message becomes «Vale. Mañana te vuelvo a preguntar.» Nothing is stored; tomorrow's
+  ask comes anyway because the ask is once per day.
+- «Sí, normal»: writes `{date: today, flow: medium}` and goes to the pain step.
+- «Sí, otro día»: a picker of the last seven days (`[jue 15] [vie 16] [sáb 17] / [dom 18] [lun 19]
+  [mar 20] / [Volver]`). A day writes `flow: unspecified` for it and continues with the flow step for
+  that day, then the gaps up to today.
+
+**Period day (or a missing day):**
+
+```
+Lucía, día 2 de la regla. ¿Cómo va hoy?
+[Poco] [Normal] [Mucho]
+[Igual que ayer]
+[Ya no sangro] [Contarte más]
+```
+
+For a missing day the second row is `[Ese día ya no sangraba] [No me acuerdo]`. «Igual que ayer»
+copies the previous day's flow, pain and symptoms in one tap (shown only when the previous day has a
+flow). «Ya no sangro» writes `flow: none` and closes the period. «No me acuerdo» stores
+`skip:<date>` and never asks about that day again.
+
+**Pain step** (after a flow):
+
+```
+Miércoles 21: normal. ¿Y el dolor? 0 es nada y 10, el peor que conoces.
+[0] [1] [2] [3] [4] [5]
+[6] [7] [8] [9] [10]
+```
+
+**Symptoms step** (toggles; a chosen one shows «✓»):
+
+```
+Miércoles 21: normal, dolor 4. ¿Algo más? Marca lo que notes y pulsa «Listo».
+[Calambres] [Hinchazón] [Dolor de cabeza]
+[Diarrea] [Estreñimiento] [Dolor lumbar]
+[Otro: escríbemelo] [Listo]
+```
+
+The six are her most frequent symptoms in the log, padded with defaults in that order.
+
+**Done step:**
+
+```
+Hecho: miércoles 21, día 1. Normal, dolor 4, calambres. Mañana a las 21:00 te pregunto otra vez.
+[Corregir] [Contarte más]
+```
+
+If more dates are queued (missing days first, then today), the message instead reads «Anotado el
+viernes 23. Ahora, ¿cómo va hoy, sábado 24?» with the period keyboard. Day 1 costs three taps and no
+typing; a later day can be one tap.
+
+**Callback data** (at most 64 bytes, every item carries its date):
+
+| data | meaning |
+|---|---|
+| `y:YYYYMMDD:light\|medium\|heavy\|unspecified` | start that day with that flow (waiting card and picker) |
+| `f:YYYYMMDD:none\|light\|medium\|heavy\|same` | flow for that day; `same` copies the previous day |
+| `p:YYYYMMDD:0..10` | pain |
+| `s:YYYYMMDD:<symptom id>` | toggle a symptom |
+| `d:YYYYMMDD` | «Listo»: next queued date, or finish |
+| `pick:YYYYMMDD` / `back:YYYYMMDD` | open the day picker / return to the waiting card |
+| `wait:YYYYMMDD` | «Todavía no» |
+| `skip:YYYYMMDD` | «No me acuerdo» |
+| `fix:YYYYMMDD` | «Corregir»: reopen the flow step for that date |
+| `more:YYYYMMDD` | «Contarte más»: send the free-text prompt |
+
+The next step is computed from the log, never from a session table, so a stale keyboard from yesterday
+still works and a restart mid-flow loses nothing. A callback date is bounded exactly like a record
+block's (5.1): outside `[today - 90, today]` the tap gets a toast and writes nothing, so a months-old or
+forwarded card cannot plant an isolated bleed day that the 10-day rule would turn into a cycle start.
+
+### 4.2 Who may do what
+
+- Records come from her (`telegram.user_id`) or from an admin (`telegram.admins`), who may tap her
+  cards and use `/anotar` for her. Admin writes carry `source: admin`.
+- A tap by anyone else gets the toast «Esto es solo para Lucía.» and changes nothing. Messages from
+  anyone else get no answer.
+- The configured group and private chats with her or an admin are the only chats answered.
+
+### 4.3 Free text, with Telegram privacy mode on
+
+A bot in privacy mode receives, in a group, commands, replies to its own messages and button taps.
+Whether it also receives messages that @mention it is unsettled in Telegram's own docs (the privacy
+mode feature page omits mentions; the Bot API's ForceReply section says a privacy-mode bot "only
+receives commands, replies to its messages and mentions"), so the design relies on nothing arriving by
+mention. The rules, in both privacy settings:
+
+- **A reply to any bot message** is a message to the bot. Swipe-reply on the phone is enough.
+- **A message that mentions the bot** (a `mention` entity equal to its `@username`) is a message to
+  the bot, with the mention stripped. It costs one check; whether Telegram delivers it with privacy
+  mode on is what the live check at deploy tells, and the design works either way.
+- **«Contarte más»** sends a short prompt with `force_reply` and `selective: true` that mentions her:
+  «Lucía, cuéntame. Te leo.» Her client opens the reply box by itself; her message arrives as a reply.
+  The mention is `@username` when `telegram.username` is set (Telegram's documented selective target),
+  else an HTML text mention `<a href="tg://user?id=…">name</a>`.
+- **An assistant answer that ends with "?"** goes out with `reply_parameters` to her message plus
+  selective `force_reply`, so her follow-up reaches the bot too.
+- **`/hoy <texto>`** sends text to the bot through a command.
+- **Privacy off** (`getMe.can_read_all_group_messages` true, read at start) adds one rule: every text
+  from her (`telegram.user_id`) in the configured group is a message to the bot. The group exists for
+  this, so «me ha bajado hoy» typed at 10:00 with no card open is answered and logged. Admins' plain
+  text still needs a reply, a mention or a command, so the two of them can talk in the group without
+  the bot answering him.
+
+Cards cannot carry `force_reply`: Telegram allows one `reply_markup` per message, and buttons win there
+because they work with the assistant down.
+
+### 4.4 Commands
+
+Spanish names first, English aliases second; both are accepted, and `/cmd@botname` too. The bot sets
+the menu itself with one `setMyCommands` call at start (default scope, the five she uses: hoy,
+resumen, anotar, deshacer, ayuda); the admin commands are listed by `/ayuda` when an admin asks.
+Nothing is set in BotFather, which this call would overwrite anyway.
+
+| command | who | does |
+|---|---|---|
+| `/hoy` (`/today`) `[texto]` | her, admins | sends today's card; with text, the text goes to the assistant bound to today |
+| `/resumen` (`/summary`) | her, admins | last period, recent lengths (with at least three), usual length, next window, the three symptoms logged most; no AI |
+| `/anotar` (`/log`) `<cuándo> <cuánto> [dolor] [síntomas…]` | her, admins | deterministic, no AI: `/anotar ayer mucho 6 calambres hinchazón`. `cuándo` is hoy, ayer, anteayer, a weekday (the most recent past one), `D/M` or `YYYY-MM-DD`; `cuánto` is nada, poco, normal, mucho; an integer 0..10 is pain; the rest are symptom labels matched by prefix |
+| `/deshacer` (`/undo`) | her, admins | undoes the last check-in: the uncommitted batch, else the last `log:` commit (2.2) |
+| `/estado` (`/status`) | admins | phase, whether today was asked and answered, when the assistant last answered, git sync state |
+| `/nuevo` (`/new`) | admins | drop the pending lines and the assistant conversation; the next turn starts fresh. If the plugin's `forget` raises, the conversation stays and the admin is told (`new_failed`) |
+| `/presentacion` (`/about`) | admins | posts the introduction text once, when an admin asks for it |
+| `/ayuda` (`/help`) | anyone allowed | the list |
+
+## 5. From words to a record
+
+### 5.1 The record block
+
+When a message states facts about one or more days, the assistant ends its answer with at most one
+fenced block, nothing after it:
+
+````
+```record
+{"days": [{"date": "2025-03-13", "flow": "light", "pain": 2, "symptoms": ["headache"]},
+          {"date": "2025-03-14", "flow": "none"}],
+ "delete": []}
+```
+````
+
+- `days[]`: `date` plus any of `flow`, `pain`, `symptoms`, `note`. Replace-field semantics (2.2).
+- `delete[]`: dates to remove entirely («borra lo de hoy, me equivoqué»).
+- Not allowed: `cycle_start`, `source`, any other key.
+
+`assistant.extract(text) -> (clean_text, block | None)` takes the last block out.
+`records.validate_block(block, today) -> Change | error` is **all or nothing**: every date in
+`[today - 90, today]`, at most 14 days per block, flow in the enum, pain an int 0..10, symptoms from
+`SYMPTOMS`, note at most 500 chars, no unknown keys. On any failure nothing is written and the bot says
+«No he sabido anotarlo bien, así que no he guardado nada. ¿Me lo dices con los botones?» with today's
+keyboard. The error is a reason code only (`bad_date`, `unknown_flow`, `unknown_symptom`, `unknown_key`,
+`too_many_days`...), never the offending value: it ends up in the service log (section 11).
+
+The confirmation is built from the `Change`, never from the assistant's prose:
+
+```
+Anotado:
+• jueves 13: poco, dolor 2, dolor de cabeza
+• viernes 14: sin sangrado (cierro esta regla)
+```
+
+A changed day reads «• jueves 13: poco → mucho», a deleted one «• lunes 10: borrado». A date whose
+line before equals its line after is left out, and when nothing changed no «Anotado:» goes out at all:
+that is what makes a block answered twice (a resend, an orphaned turn) harmless. The closing line and
+the deterministic red flag apply here exactly as for buttons.
+
+### 5.2 The turn
+
+One worker thread runs assistant turns, one at a time across all chats. A text message for the bot is
+appended to the SQLite list `pending:<chat>` as `{"id", "ts", "content"}` and the chat is queued. The
+worker takes every pending line of that chat as `new`, builds the turn, calls the plugin, and on
+`kept: true` posts the text, applies the block and removes the lines it took (lines that arrived
+meanwhile stay). On an exception, a timeout or `kept: false` the app posts `ai_down` with the keyboard,
+applies no block, and leaves the lines pending so they go with the next turn. A `typing` chat action is
+sent once at the start.
+
+`pending:<chat>` is capped: the newest 10 lines, none older than 7 days; what falls off is logged as a
+count only. Without the cap a long outage would pile up lines until the plugin's prompt is refused as
+too large, and every later turn would fail the same way. `/nuevo` clears the pending lines as well as
+the conversation id, so an admin can always reset a chat.
+
+The user line is `Name: text`; a reply carries the quoted bot text in front: `Lucía: [replying to the
+bot: día 3 de la regla. ¿Cómo va hoy?] ayer poco y hoy nada`.
+
+### 5.3 What the assistant gets every turn
+
+**Rules** (`supercycletracker/rules.md`, English, shipped in the public repo, filled with `{name}`,
+`{language_name}`, `{others}`, `{symptom_ids}` and the profile's optional `assistant.instructions`):
+
+```
+You are the cycle companion of {name} in a Telegram chat. The cycle is hers; {others} may also
+write (they are family and can report for her). Answer in {language_name}: warm, brief (two to five
+short sentences unless she asks for more), plain text with no Markdown, links as bare URLs.
+
+Messages arrive as "Name: text". A reply carries "[replying to the bot: ...]" in front.
+
+What you do
+- Help her log her period: bleeding (none, light, medium, heavy), pain 0-10, symptoms, a short note.
+- Answer questions about her cycle and health with her own history in mind. Read context.md and
+  cycle/log.jsonl first and say what her data shows ("in your last six cycles...").
+- When her data is not enough, search the web; prefer public health sources (NHS, MedlinePlus,
+  Mayo Clinic, national gynaecology societies) and give one link.
+- The bot already asks her every day with buttons; never nag her to log.
+
+What you never do
+- Never diagnose or name a condition she may have. Never start, stop or dose a medicine beyond
+  "as the leaflet says".
+- Never lecture or list warnings she did not ask for.
+- Never claim something is saved: the bot shows what it recorded under your answer.
+- Never mention files, tools, blocks or how you work.
+- Never bring up pregnancy, fertility or contraception unless she does.
+
+When to suggest a doctor (once, one kind sentence, no alarm)
+- soaking a pad or tampon every hour for several hours; clots bigger than a coin; bleeding more
+  than 7 days; pain that stops her daily life or does not ease with her usual painkiller; bleeding
+  between periods or after sex that repeats; no period for 90 days.
+Urgent (say plainly: call the emergency number or go to the emergency room): fainting or dizziness
+with heavy bleeding, sudden severe pelvic or abdominal pain, fever with pelvic pain.
+
+Recording
+When a message says how a day went, including earlier days ("ayer poco, hoy nada", "me bajó el
+martes"), end your answer with exactly one block and nothing after it:
+
+```record
+{"days": [{"date": "YYYY-MM-DD", "flow": "light", "pain": 3, "symptoms": ["headache"], "note": "..."}], "delete": []}
+```
+- Resolve relative dates only with the calendar in context.md. If you are not sure which day she
+  means, ask instead of writing the block.
+- Send only what she said. A field you send replaces that field for that day; to add a symptom, send
+  the day's whole list. "none" means no bleeding that day and closes the period. Light bleeding
+  between periods is the symptom "spotting", never a flow.
+- Pain: her number. If she describes it in words, pick the closest (nada 0, un poco 2, algo 4,
+  bastante 6, mucho 8, insoportable 10) and say the number in your answer so she can correct it.
+- Symptom ids: {symptom_ids}. Anything else goes in "note", in her words.
+- To fix a wrong day, send it again with the right value; to remove one, put its date in "delete".
+- A question with no new facts gets no block.
+{instructions}
+```
+
+**Context** (`context.md`, rebuilt every turn by `assistant.context(...)`):
+
+```
+# Today
+Friday (viernes) 2025-03-14, 21:14 Europe/Madrid. Bot day 2025-03-14 (a day ends at 05:00). She is 29.
+
+# Where she is
+Period day 3 (started Wednesday 2025-03-12). The bot asked at 21:00 about today; not answered yet.
+Missing days the bot still wants: Thursday 2025-03-13.
+
+# Prediction (last 6 cycles)
+Cycle lengths: 29, 32, 30, 27, 31, 30 (median 30, range 27-32). Usual period: 4 days.
+After this period: next start around 2025-04-11 (window 2025-04-08 .. 2025-04-13).
+
+# Calendar, last 14 days (use it for "ayer", "el martes"...)
+vie 2025-03-14 (today): -
+jue 2025-03-13: -
+mié 2025-03-12: medium, pain 4, abdominal_cramps [day 1]
+mar 2025-03-11: -
+...
+
+# Her symptoms over the log
+abdominal_cramps in 3 periods (usually day 1-2); headache 3; nausea 1; fatigue 1.
+
+# People
+Lucía (whose cycle this is); Marta (admin)
+```
+
+Every number above is invented (the weekdays are real: compute them with `datetime` before editing
+the example). The fixtures follow the same rule: `tests/fixtures/log_fictional.jsonl` is written from
+scratch with its own dates and a dozen starts, never copied or shifted from a real log.
+
+**Files:** `{"cycle/log.jsonl": <whole text>}`. A few kilobytes, so it goes whole.
+
+### 5.4 Without the assistant, or with it down
+
+- Buttons, `/hoy`, `/anotar`, `/resumen`, `/deshacer`, `/estado` work with no assistant at all.
+- Free text with `assistant.plugin` unset: «Sin el asistente no entiendo mensajes escritos. Puedes
+  anotarlo con los botones:» plus today's keyboard.
+- The plugin raises, runs out of time or returns `kept: false`: «Ahora mismo no puedo leer mensajes
+  escritos. Puedes anotarlo con los botones y, si me lo vuelves a escribir más tarde, lo leo.» plus the
+  keyboard. No block is applied. Her message stays pending and goes with her next one. Nothing is
+  retried in the background.
+
+## 6. The plugin contract (public app ⇄ assistant plugin)
+
+The app loads one Python file from the data directory. `profile.yaml` `assistant.plugin` gives its path;
+it must resolve inside the data directory. The loader caches one module per `(path, mtime_ns)`, so a
+data-repository pull reloads an edited plugin. A blocking plugin runs in the worker thread.
+
+```python
+# required
+def converse(turn: dict, settings: dict) -> dict | str: ...
+# optional: drop a conversation (called by /nuevo)
+def forget(conversation: str, settings: dict) -> None: ...
+```
+
+`turn`:
+
+```json
+{
+  "conversation": "any string the plugin returned last time in this chat, or null",
+  "rules": "<the rules text, section 5.3>",
+  "context": "<context.md, section 5.3>",
+  "files": {"cycle/log.jsonl": "<the whole file>"},
+  "new": [{"role": "user", "content": "Lucía: [replying to the bot: día 3 de la regla. ¿Cómo va hoy?] ayer poco y hoy nada"}]
+}
+```
+
+The language is not a field: it arrives inside `rules`, already filled.
+
+`new` holds every message the plugin has not kept yet, oldest first; it never contains the bot's own
+answers. There is no history or recap field: the log plus the context is the memory, so a provider
+that starts over loses nothing that matters.
+
+`settings` is the `assistant:` mapping from `profile.yaml` minus `plugin` and `instructions`, for
+example `{"timeout_s": 600, "model": null}`.
+
+Return value, either a bare string (no conversation kept) or:
+
+```json
+{"text": "Vale. Si mañana vuelve, me dices.\n\n```record\n{\"days\": [...], \"delete\": []}\n```",
+ "conversation": "sct-3f9a1c0d7e2b4a6f8c11",
+ "kept": true}
+```
+
+- The app stores `conversation` per chat (SQLite key `conv:<chat>`); `null` starts over next time.
+- `kept: false` means the provider did not store the turn. The app treats it as a failed turn: it
+  posts `ai_down`, applies no block from `text`, and sends the same `new` lines again with the next
+  turn. A plugin that has a usable answer returns `kept: true` with it.
+- The plugin must return before `settings.timeout_s`; the app cannot stop its thread. A plugin that
+  outlives the wait would store a turn the app never saw.
+- The record block comes back inside `text`; the app extracts it. A provider that strips fenced blocks
+  must leave `record` alone.
+
+The public repo ships `tests/fixtures/fake_plugin.py` (a scripted `converse`) as the only example.
+
+## 7. i18n
+
+`i18n.py` is a 50-line Translator: `locales/en.yaml` is the source, the chosen locale is merged on
+top, a missing key falls back to English. `t.date(d)` renders «miércoles 21 de octubre» (es) or
+«Wednesday 21 October» (en); `t.flow(x)` and `t.symptom(id)` give labels. `profile.language` picks the
+locale. English source strings and their Spanish translations:
+
+| key | en | es |
+|---|---|---|
+| `ask_waiting` | {m}, from your past cycles your period could come any day now. Has it started? | {m}, por tus últimos ciclos la regla podría llegarte estos días. ¿Te ha bajado ya? |
+| `ask_late` | {m}, any news? When it comes, one tap is enough. | {m}, ¿alguna novedad? Cuando te baje, me lo dices con un toque. |
+| `ask_period` | {m}, day {n}. How is it going today? | {m}, día {n} de la regla. ¿Cómo va hoy? |
+| `ask_gap_one` | {m}, yesterday slipped by. How was {date}? | {m}, ayer se nos pasó. ¿Cómo fue el {date}? |
+| `ask_gap_many` | {m}, a few days slipped by. One at a time: how was {date}? | {m}, se nos pasaron unos días. Vamos uno a uno: ¿cómo fue el {date}? |
+| `ask_catchup` | {m}, to close this period I am missing {date}. Do you remember roughly how it was? | {m}, para cerrar esta regla me falta el {date}. ¿Te acuerdas más o menos de cómo fue? |
+| `ask_pain` | {done} And the pain? 0 is none, 10 the worst you know. | {done} ¿Y el dolor? 0 es nada y 10, el peor que conoces. |
+| `ask_symptoms` | {done} Anything else? Tap what you notice, then «Done». | {done} ¿Algo más? Marca lo que notes y pulsa «Listo». |
+| `card_done` | Done: {date}, day {n}. {summary} | Hecho: {date}, día {n}. {summary} |
+| `next_today` | Noted {date}. Now, how is today, {next}? | Anotado el {date}. Ahora, ¿cómo va hoy, {next}? |
+| `next_gap` | Noted {date}. Now, how was {next}? | Anotado el {date}. Ahora, ¿cómo fue el {next}? |
+| `tomorrow` | Tomorrow at {time} I will ask again. | Mañana a las {time} te vuelvo a preguntar. |
+| `not_yet` | OK. I will ask again tomorrow. | Vale. Mañana te vuelvo a preguntar. |
+| `skipped` | No problem, I leave {date} blank. | No pasa nada, dejo el {date} en blanco. |
+| `pick_day` | Which day did it start? | ¿Qué día te bajó? |
+| `closed` | That closes this period: {days} days, from {start} to {end}. The next one should come around {expected} (between {ws} and {we}). I will not bother you until then. | Cierro esta regla: {days} días, del {start} al {end}. La próxima, hacia el {expected} (entre el {ws} y el {we}). Hasta entonces no te molesto. |
+| `day7` | That is 7 days, so I stop asking every day. If it goes on, tell me with /hoy whenever you like; if it lasts much longer than usual, it is worth mentioning to your doctor. | Llevamos 7 días, así que dejo de preguntarte cada día. Si sigue, cuéntamelo con /hoy cuando quieras; si dura bastante más de lo habitual, merece la pena comentarlo con tu médico. |
+| `tell_me` | {m}, tell me. I am listening. | {m}, cuéntame. Te leo. |
+| `placeholder` | E.g.: light, pain 3, bloated | Ej.: poco, dolor 3, hinchada |
+| `recorded` | Noted: | Anotado: |
+| `line_new` | • {date}: {summary} | • {date}: {summary} |
+| `line_changed` | • {date}: {before} → {after} | • {date}: {before} → {after} |
+| `line_closed` | • {date}: no bleeding (that closes this period) | • {date}: sin sangrado (cierro esta regla) |
+| `line_deleted` | • {date}: deleted | • {date}: borrado |
+| `invalid_block` | I could not note that properly, so I saved nothing. Can you tell me with the buttons? | No he sabido anotarlo bien, así que no he guardado nada. ¿Me lo dices con los botones? |
+| `ai_down` | Right now I cannot read written messages. You can note it with the buttons, and if you write it again later I will read it. | Ahora mismo no puedo leer mensajes escritos. Puedes anotarlo con los botones y, si me lo vuelves a escribir más tarde, lo leo. |
+| `no_ai` | Without the assistant I cannot read written messages. You can note it with the buttons: | Sin el asistente no entiendo mensajes escritos. Puedes anotarlo con los botones: |
+| `pain_high` | A pain of {n} is a lot. If it does not ease with what you usually take, or it happens often, it is worth mentioning to your doctor. | Un dolor de {n} es mucho. Si no se te pasa con lo que sueles tomar, o te pasa a menudo, merece la pena comentarlo con tu médico. |
+| `only_her` | This is only for {name}. | Esto es solo para {name}. |
+| `toast_saved` | Noted: {what} | Apuntado: {what} |
+| `undo_done` / `undo_none` | Undone: {what}. / Nothing to undo. | Deshecho: {what}. / No hay nada que deshacer. |
+| `summary_title` | Your cycle, {name}: | Tu ciclo, {name}: |
+| `summary_last` | • Last period: {start}, {days} day(s) logged. | • Última regla: {start}, {days} día(s) apuntado(s). |
+| `summary_lengths` | • Recent cycles: {lengths} days (your usual: {median}). | • Ciclos recientes: {lengths} días (lo normal en ti: {median}). |
+| `summary_period` | • Usual length: {days} days. | • Duración habitual: {days} días. |
+| `summary_next` | • Next: around {expected} (between {ws} and {we}). | • Próxima: hacia el {expected} (entre el {ws} y el {we}). |
+| `summary_symptoms` | • What you log most: {items}. | • Lo que más anotas: {items}. |
+| `summary_empty` | I do not have enough data yet. | Aún no tengo datos suficientes. |
+| `status` | Phase: {phase}. Today: {asked}. Assistant: {ai}. Data: {git}. | Fase: {phase}. Hoy: {asked}. Asistente: {ai}. Datos: {git}. |
+| `phase_no_history` / `phase_quiet` / `phase_waiting` / `phase_late` / `phase_period` | no history / quiet until {ws} / waiting ({ws} to {we}) / late since {we} / period day {n} | sin historial / tranquila hasta el {ws} / esperando (del {ws} al {we}) / con retraso desde el {we} / regla, día {n} |
+| `status_asked` / `status_answered` / `status_not_asked` | asked, no answer yet / asked and answered / not asked yet | preguntado, sin respuesta / preguntado y respondido / aún no preguntado |
+| `status_ai_ok` / `status_ai_never` / `status_ai_none` | last answer {ago} ago / no answer since start / no assistant configured | última respuesta hace {ago} / sin respuesta desde el arranque / sin asistente |
+| `status_git_ok` / `status_git_unpushed` / `status_git_down` | synced / {n} commit(s) not pushed / remote unreachable at start | sincronizado / {n} commit(s) sin subir / remoto inaccesible al arrancar |
+| `anotar_usage` | Usage: /anotar <when> <flow> [pain 0-10] [symptoms…]. Example: /anotar ayer mucho 6 calambres | Uso: /anotar <cuándo> <cuánto> [dolor 0-10] [síntomas…]. Ejemplo: /anotar ayer mucho 6 calambres |
+| `anotar_saved` | Noted without the assistant: {summary}. If that is wrong, /deshacer. | Anotado sin el asistente: {summary}. Si no es así, /deshacer. |
+| `new_conversation` | Starting a fresh conversation. What is noted stays. | Empiezo una conversación nueva. Lo apuntado sigue igual. |
+| `new_failed` | I could not drop the assistant's conversation, so it stays as it was. Try again in a minute. | No he podido borrar la conversación del asistente, así que sigue como estaba. Prueba otra vez en un minuto. |
+| `test_mark` | (test) | (prueba) |
+| `menu` | the descriptions of the five commands in the menu | idem |
+| buttons | Yes, light · Yes, medium · Yes, heavy · Yes, another day · Not yet · Light · Medium · Heavy · Same as yesterday · It stopped · It had stopped that day · I don't remember · Tell you more · Other: I'll write it · Done · Fix · Back | Sí, poco · Sí, normal · Sí, mucho · Sí, otro día · Todavía no · Poco · Normal · Mucho · Igual que ayer · Ya no sangro · Ese día ya no sangraba · No me acuerdo · Contarte más · Otro: escríbemelo · Listo · Corregir · Volver |
+| flows | none · unspecified · light · medium · heavy | sin sangrado · sangrado · poco · normal · mucho |
+| `pain` | pain {n} | dolor {n} |
+| symptoms | cramps · bloating · headache · lower back pain · pelvic pain · breast pain · nausea · diarrhea · constipation · fatigue · mood changes · acne · poor sleep · appetite changes · clots · spotting | calambres · hinchazón · dolor de cabeza · dolor lumbar · dolor pélvico · pecho dolorido · náuseas · diarrea · estreñimiento · cansancio · cambios de humor · granos · duermo mal · cambios de apetito · coágulos · manchado |
+| `days` / `months` | Monday… / January… | lunes, martes, miércoles, jueves, viernes, sábado, domingo / enero, febrero, marzo, abril, mayo, junio, julio, agosto, septiembre, octubre, noviembre, diciembre |
+| `date_long` / `date_short` | {weekday} {day} {month} / {day} {month} | {weekday} {day} de {month} / {day} de {month} |
+| `words_flow` | none: [none, nothing]; light: [light]; medium: [medium, normal]; heavy: [heavy] | none: [nada]; light: [poco, poquito]; medium: [normal]; heavy: [mucho] |
+| `words_when` | today, yesterday, day before yesterday | hoy, ayer, anteayer |
+| `help`, `intro` | the command list; the introduction an admin posts with /presentacion | idem |
+
+`{m}` is the mention (`@username` or the HTML text mention); the bot's own templates go out with
+`parse_mode: HTML`. Assistant answers go out as plain text with `reply_parameters` to her message.
+
+`tests/test_i18n.py` is a check that can fail, with a positive control: every `en` key exists in `es`
+with the same `{placeholders}`; every Spanish string containing `?` also contains `¿` and every `!` a
+`¡`; the test is run once against a deliberately broken string («Ha llegado?») and must fail on it.
+
+## 8. Storage and git
+
+- `<data>` is a checkout of the household's private data repository. The bot is the **only writer of
+  `cycle/log.jsonl`**. People edit `profile.yaml` and the plugin and push.
+- A write is: take `DATA_LOCK`, load, apply, write a temp file, `os.replace`, release. The file on the
+  volume is the truth as soon as the tap is answered. Button writes happen on the main thread and
+  record blocks on the worker thread, so the lock is what keeps them apart.
+- `repo.flush()` runs on every tick and **holds `DATA_LOCK` for its whole git sequence** (status, add,
+  commit, pull, push), and for the hourly pull: git rewrites the file on a pull, and a write landing in
+  the middle of that would lose one side. If `git status --porcelain cycle/log.jsonl` shows a change
+  and the newest write is at least 60 s old (or `force=True` on SIGTERM), it runs `git add
+  cycle/log.jsonl`, `commit -m "log: <dates>"`, `pull --rebase -X theirs`, `push`. A whole three-tap
+  check-in becomes one commit. Commit messages carry dates only, never values.
+- When nothing is dirty, `flush()` pulls once an hour (`pull --rebase -X theirs --quiet`), so profile
+  and plugin edits arrive; the plugin reloads by mtime.
+- **Conflicts resolve themselves.** In a rebase, `-X theirs` is the commit being replayed, that is the
+  bot's; a conflicting hunk in `cycle/log.jsonl` resolves to the bot's line and non-conflicting human
+  edits survive. After any pull that changed the file the bot reloads it and re-runs `derive_starts`;
+  if that changes a flag the next `flush()` commits it. The bot stays the only writer of the file by
+  rule, so a conflict is rare (a hand edit on the git host, an import pushed while a commit was in
+  flight) and never leaves the register stuck. A rebase that still fails (not a content conflict) runs
+  `rebase --abort` and keeps the commit; a failed push keeps it too, and the next tick tries again.
+  Never a force push.
+- The token travels in `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n=http.extraHeader` /
+  `GIT_CONFIG_VALUE_n=Authorization: token …` for each git call, never on the command line, never in
+  `.git/config`. Commits are authored `SuperCycleTracker <supercycletracker@localhost>`.
+- At start the bot runs `git push --dry-run` and keeps the result in memory for `/estado`, which also
+  counts `git rev-list --count @{u}..HEAD` to say how many commits are not pushed. The time of the last
+  successful assistant turn is in memory too; both reset on a restart and `/estado` says so.
+- `<data>/state/sct.sqlite` is git-ignored. One table `kv(key TEXT PRIMARY KEY, value TEXT)` holding
+  exactly: `offset`, `last_ask`, `conv:<chat>`, `pending:<chat>`, `skip:<date>`, `migrated_chat`.
+  Everything else (`/estado` facts, what was already said, undo) is read from git, the log or the
+  `Change`. The connection is opened with `check_same_thread=False` behind one lock, since the worker
+  thread writes too.
+
+## 9. Telegram
+
+- `telegram.py` is a stdlib `urllib` client: `call(method, **params)`, 429 honoured up to twice
+  (`retry_after`, capped at 60 s), errors reported as `TelegramError(method, code, description)` whose
+  text never contains the URL (the token is in it). `safe(e)` strips the token from any exception.
+- The main loop: `getUpdates(timeout=20, allowed_updates=["message", "callback_query"])`, handle
+  each update (callbacks answered inline; free text appended to `pending` and the chat queued for the
+  worker), then `tick(now)`: the scheduled ask, `repo.flush()`, and a touch of `/tmp/sct.alive` for the
+  container healthcheck.
+- 409 on `getUpdates` (another poller) waits 30 s and keeps the offset; 5xx and network errors back off
+  5 s to 300 s.
+- `migrate_to_chat_id` (basic group to supergroup) is stored in `migrated_chat` and used from then on,
+  with a warning to update `profile.yaml`.
+- At start the bot reads `getMe.can_read_all_group_messages`, logs it once, and keeps it for the
+  privacy-off rule (4.3).
+
+## 10. Apple Health import
+
+`sct import-apple-health <export.zip|export.xml> --data <dir> [--dry-run]` (`applehealth.py`):
+
+- **Input.** A zip opens the largest `*.xml` member that is not `*_cda.xml` and not under
+  `electrocardiograms/` or `workout-routes/`; the member name is localised (`export.xml`,
+  `exportación.xml`), so it is never hard-coded. The file is streamed from the zip with
+  `xml.etree.ElementTree.iterparse`, each element cleared after use, so a 1 GB file runs in constant
+  memory. Expat parses the export's inline DTD (checked on HealthKit export version 17) and resolves no
+  external entities.
+- **Flow.** `Record type="HKCategoryTypeIdentifierMenstrualFlow"`. The value is one of three forms, all
+  accepted: the names `HKCategoryValueVaginalBleeding{Unspecified,Light,Medium,Heavy,None}` (what
+  current exports write), the older names `HKCategoryValueMenstrualFlow{…}`, or the integers 1
+  unspecified, 2 light, 3 medium, 4 heavy, 5 none. Several records on one day keep the heaviest.
+- **Cycle start.** `<MetadataEntry key="HKMenstrualCycleStart" value="1|0"/>` is a child element on the
+  line after each `<Record …>`. It is read only to report agreement with the 10-day rule, which decides
+  `cycle_start`.
+- **Symptoms.** The `HKCategoryTypeIdentifier<Type>` rows of the table in 2.1. A value whose name ends
+  in `NotPresent` or `NoChange`, or the integer 1 for a severity type, means absent and is skipped;
+  anything else counts as present. Severity is not kept. `IntermenstrualBleeding` becomes the symptom
+  `spotting`.
+- **Date.** `startDate="2025-03-12 12:00:00 +0100"` converted to the profile timezone, then its date.
+- **Source.** `ExportDate` gives `source = "apple-health-export-<YYYY-MM-DD>"`.
+- **Merge.** Days whose `source` is `telegram` or `admin` are never overwritten. Days from an earlier
+  import are replaced. `cycle_start` is re-derived. It prints counts only (records read, days written,
+  starts found, agreement with the metadata flags) and never commits: the person reviews `git diff` and
+  commits. `--dry-run` writes nothing.
+
+`sct check --data <dir>` validates `profile.yaml` and every log line and reports `cycle_start` flags
+that differ from the recomputation (exit 1 on errors). `sct predict --data <dir> [--today D]` prints the
+prediction. `sct say --data <dir> --ask` sends today's card marked «(prueba)» without touching
+`last_ask`: the positive control for a live deployment.
+
+## 11. Privacy
+
+- The service logs event kinds and counts only: `ask sent`, `callback ok`, `record written days=2`,
+  `ai turn ok 34s`, `git push ok`, `getUpdates failed: HTTP 502`, `block refused: unknown_symptom`. No
+  message text, no dates of records, no flow, pain or symptom values, no names. `safe(e)` keeps an
+  exception's class and HTTP status, and its `str()` only for the app's own exception classes, whose
+  messages are reason codes; a plugin's or a library's exception text may quote her words or the
+  assistant's and is never logged.
+- `tests/test_privacy.py` runs a full scripted flow with `caplog` at DEBUG, including a record block
+  with an invalid symptom that contains a planted word, and asserts that none of the scripted texts,
+  dates, symptom ids or the planted word appear. It runs once with a planted `log.info(text)` to show
+  it goes red.
+- The public image holds only the package. `<data>` is a volume. `.dockerignore` excludes `data/`,
+  `tests/fixtures/*.jsonl` and `.beads/`. Every public test and doc uses fictional people and dates.
+
+## 12. Tests (no network)
+
+- `FakeTelegram` implements `call(method, **params)`: records every call, returns increasing
+  `message_id`s, is fed scripted updates (messages, replies, callback queries, migration), and can return
+  429 with `retry_after` or "message is not modified" on demand.
+- `Clock` is passed to `Bot(now=...)` and to `cycle.*(today=...)`, with `advance(hours=…)`.
+- `tests/fixtures/fake_plugin.py` has a `converse` that returns a scripted text with or without a
+  record block, `kept` true or false, or raises.
+- `tmp_path` holds a data dir plus a bare git remote and a second "human" clone, so git sync is tested
+  for real.
+- Tests call `bot.handle(update)` and `bot.tick(now)` directly and drain the worker with
+  `bot.worker.join_idle()`; production `run()` is only the loop around them.
+
+| file | covers |
+|---|---|
+| `test_records.py` | derive_starts reproduces the fictional log's flags; the gap rule at exactly 10 vs 11 days; `none` and `spotting` never start a cycle; replace-field semantics; delete; untouched lines byte-identical; validate_block refuses a future date, a date older than 90 days, pain 11, an unknown flow, an unknown symptom, an unknown key, 15 days, each with a reason code that does not contain the value; a Change with before == after is empty |
+| `test_cycle.py` | lengths outside 20..45 dropped; median and window; fewer than 3 lengths; period length; `bot_day` at 04:59 vs 05:01; DST days 2026-03-29 and 2026-10-25; each phase kind with its exit; day 8 is `period` only while days are missing |
+| `test_schedule.py` | quiet before the window; the ask at `ask_at`, not before, not twice, not after `ask_at + 2 h`; `ask_at` 23:00 with ticks at 22:59, 23:00, 00:30 and 01:00 the next day (no, yes, yes, no); skipped when today has a flow; a restart on the same day asks no second time; late asks daily; a 60-day frozen run counts the messages (at most one scheduled per bot day); missing days older than 3 never asked; the day-8 catch-up card once, with the catch-up wording, and nothing on day 8 when nothing is missing |
+| `test_bot.py` | the three-tap flow edits one message; a stale keyboard works by date; a callback dated 91 days back gets the toast and writes nothing; «Igual que ayer»; the picker; «Ya no sangro» closes and posts the closing line; a close undone and redone posts it again; day 7 line; pain 9 sends `pain_high` once, 9 again does not, 3 then 9 does; «Contarte más» sends selective force_reply with the mention; a reply triggers a turn with the turn shape of section 6; a message mentioning the bot does too; the record is written and the confirmation is built from the Change; a block whose days are unchanged posts no «Anotado:»; a future-dated block writes nothing; plugin raises, the keyboard comes and the line stays pending; `kept: false` posts `ai_down`, writes nothing, and the resend yields exactly one answer; 20 queued lines are capped to 10 and the next turn succeeds; `/nuevo` clears pending lines; a message arriving mid-turn is not dropped; an answer ending in "?" carries force_reply; plain group text from her ignored with privacy on, answered with privacy off, an admin's plain text ignored in both; a stranger's tap gets the toast; `/anotar ayer mucho 6 calambres`; `/estado` admin-only and every phase kind renders through a locale key; migration |
+| `test_repo.py` | one commit after 60 s quiet for three taps; flush on SIGTERM; the human clone pushes a profile edit between the bot's commit and push, the bot rebases and both land; the human clone changes a line of `log.jsonl` the bot also changed: the pull completes, the bot's line wins, the human's other edits survive, the push lands; the remote refuses the push (a hook that exits 1): the commit stays, `/estado` counts it, the next flush pushes after the hook is removed (positive control); `/deshacer` on a dirty file restores HEAD with no commit, on a clean `log:` HEAD makes an `undo:` commit, and on an `undo:` HEAD says nothing to undo; commit messages contain no flow or symptom words; the token never appears in `git config` |
+| `test_applehealth.py` | a fictional export in a zip with a localised member name and a `_cda.xml` beside it; the three value forms; metadata child counted; `NotPresent` skipped; heaviest of a day; `IntermenstrualBleeding` to `spotting`; a `startDate` at 23:30 +0000 lands on the next day in the profile timezone; chat days never overwritten; a rerun is a no-op; `--dry-run` writes nothing |
+| `test_i18n.py`, `test_privacy.py` | sections 7 and 11 |
+
+Each CI gate (ruff, pytest) is shown failing once on a mutated line before it is trusted.
+
+## 13. File layout
+
+```
+supercycletracker/
+  __init__.py        __version__
+  cli.py             sct run | check | predict | import-apple-health | say
+  records.py         FLOWS, SYMPTOMS, load/save, derive_starts, validate_block, apply -> Change
+  cycle.py           bot_day, predict, phase, queue; pure, today passed in
+  i18n.py            Translator; locales/en.yaml, locales/es.yaml
+  telegram.py        urllib Bot API client, TelegramError, safe()
+  bot.py             loop, tick, handlers, cards, commands, worker queue
+  assistant.py       plugin loading, turn, context.md, extract
+  rules.md           the assistant rules (5.3)
+  repo.py            SQLite kv, DATA_LOCK, atomic write, git flush, git undo
+  applehealth.py     the importer
+tests/
+  conftest.py        FakeTelegram, Clock, data_repo (bare remote + bot clone + human clone)
+  fixtures/          fake_plugin.py, export_fictional.xml, log_fictional.jsonl
+  test_records.py test_cycle.py test_schedule.py test_bot.py test_repo.py
+  test_applehealth.py test_i18n.py test_privacy.py
+docs/DESIGN.md       this file
+Dockerfile           python:3.12.<patch>-slim pinned, uv pinned, git + ca-certificates,
+                     uv sync --frozen --no-dev, HOME=/tmp, USER 1000:1000, no EXPOSE,
+                     HEALTHCHECK: /tmp/sct.alive younger than 180 s, CMD ["sct", "run"]
+pyproject.toml       name supercycletracker, requires-python >=3.12, deps [pyyaml], dev [pytest, ruff],
+                     script sct
+uv.lock  .dockerignore
+.github/workflows/ci.yml             ubuntu-latest, uv, ruff check, ruff format --check, pytest
+.github/workflows/docker-publish.yml on tags v*: tag must match __version__; buildx amd64+arm64;
+                                     drumsergio/supercycletracker:<version>
+README.md  AGENTS.md
+```
+
+## 14. Operations
+
+**Environment**
+
+| variable | meaning |
+|---|---|
+| `SCT_DATA` | the data directory (default `/data`), a git checkout of the private data repository |
+| `TELEGRAM_BOT_TOKEN` | the bot token |
+| `SCT_GIT_TOKEN` | a token with write access to the data repository, sent as an `Authorization` header on pull and push |
+| `TZ` | the container timezone; the app uses `profile.timezone` for every date |
+| anything the plugin needs | passed through the environment; the app never reads it |
+
+**Data directory**
+
+```
+cycle/log.jsonl        the records (committed; the bot writes and commits it)
+cycle/profile.yaml     who this is and how the bot talks (committed; people edit it)
+plugins/<file>.py      the assistant plugin and whatever it vendors (committed)
+state/sct.sqlite       bot plumbing (git-ignored, disposable)
+```
+
+`profile.yaml` keys the app reads (unknown keys are ignored):
+
+```yaml
+name: Lucía
+birth_date: 1993-05-02
+timezone: Europe/Madrid
+language: es
+ask_at: "21:00"
+telegram:
+  chat_id: -100123          # the group
+  user_id: 111              # whose cycle this is
+  username: lucia_example   # optional: makes selective force_reply target her by @mention
+  admins: {222: Marta}      # may use /estado, /nuevo, /presentacion, and log for her
+assistant:                  # optional; without it the bot is buttons and commands only
+  plugin: plugins/assistant.py
+  timeout_s: 600
+  model: null
+  instructions: ""          # appended to the rules
+```
+
+**What is committed:** `cycle/log.jsonl` by the bot (one commit per check-in), everything else by
+people. Nothing in the public image or repository ever names a person, a chat, a host or a provider.
+
+**Deploy shape:** one container, no published ports, read-only root filesystem, `cap_drop: ALL`, a
+tmpfs on `/tmp`, the data directory mounted at `/data` owned by uid 1000. Only one container may poll a
+bot token (Telegram answers 409 to a second one). `sct say` does not poll, so it is safe beside the
+running bot.
+
+## 15. Left out on purpose
+
+- **Built-in AI providers.** A plugin is twenty lines; leaving them out removes httpx and keeps one
+  tested assistant path.
+- **Several tracked people per instance.** A second person is a second container and data directory.
+- **Voice notes, a web UI, published ports.**
+- **A stored state machine, a chat history table, an op journal, an undo table.** The log plus the
+  date is the state; git is the journal and the undo; the assistant's own session is the chat memory.
+- **A morning nudge.** One scheduled message per day; the missed day rides on the next evening's card.
+- **Ovulation, fertility or pregnancy predictions.** Not asked for, and the stakes of a wrong one are
+  high.
+- **A spotting flow value.** Spotting is a symptom so it can never move a cycle start.
+- **Markdown in assistant replies.** Plain text means no HTML converter and no parse failures.
+- **Background retries of failed assistant turns.** The buttons are the fallback, and her unseen
+  message rides along with her next one.
+- **Caps on asking during a late period.** The question stays neutral and daily until she answers.
