@@ -1,13 +1,24 @@
 # AGENTS.md
 
-SuperCycleTracker is a menstrual cycle tracker that runs as a Telegram bot in a household group. Python 3.12, managed with uv. The repo holds the design until the first code PR; commands for tests, lint and run land with that PR.
+SuperCycleTracker is a menstrual cycle tracker that runs as a Telegram bot in a household group. Python 3.12, managed with uv. The design is [docs/DESIGN.md](docs/DESIGN.md); read it before changing behaviour.
+
+## Commands
+
+```sh
+uv run pytest -q                 # all tests, no network
+uv run ruff check .
+uv run ruff format .
+uv run sct check --data <dir>    # also: sct predict, sct import-apple-health, sct say --ask, sct run
+```
+
+Run the test suite once per change. It drives real git repositories in temp dirs, so it is slow on a loaded machine; never run it in a loop or in parallel copies.
 
 ## Rules
 
 - This is health data. Never log personal data or message contents, and never write a record anywhere except the private data repo the household owns.
 - Code never knows a person, a chat or a date of a real cycle. Those live in the data repo. Keep every example and test fictional.
 - Every user-facing string is translatable. English is the source; Spanish ships too, and the bot talks Spanish to its users.
-- The bot answers in private chat always, and in a group only when mentioned or replied to.
+- In the group the bot reads replies to the bot, answers to its questions, commands, and messages that mention it when Telegram delivers them. It also answers private chats with her or an admin.
 - The tracker syncs to a private remote named in `.beads/config.yaml`, never to this public repo. Nothing written here names the server behind it.
 - Conventional commits. PR titles say why, not what.
 

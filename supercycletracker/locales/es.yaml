@@ -65,11 +65,19 @@ status_ai_none: "sin asistente"
 status_git_ok: "sincronizado"
 status_git_unpushed: "{n} commit(s) sin subir"
 status_git_down: "remoto inaccesible al arrancar"
+status_git_unknown: "desconocido, no hay rama remota con la que comparar"
 
 # --- commands ------------------------------------------------------------------------------
 anotar_usage: "Uso: /anotar &lt;cuándo&gt; &lt;cuánto&gt; [dolor 0-10] [síntomas…]. Ejemplo: /anotar ayer mucho 6 calambres"
 anotar_saved: "Anotado sin el asistente: {summary}. Si no es así, /deshacer."
 new_conversation: "Empiezo una conversación nueva. Lo apuntado sigue igual."
+test_mark: "(prueba)"
+menu:
+  hoy: "La pregunta de hoy, o cuéntame algo"
+  resumen: "Tu ciclo en pocas líneas"
+  anotar: "Anotar un día sin el asistente"
+  deshacer: "Deshacer lo último que anoté"
+  ayuda: "Lo que entiendo"
 help: |-
   Esto es lo que entiendo:
   /hoy: la pregunta de hoy; con texto detrás, me lo cuentas

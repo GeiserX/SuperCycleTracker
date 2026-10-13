@@ -8,9 +8,18 @@ from zoneinfo import ZoneInfo
 import pytest
 from conftest import Clock, FakeTelegram
 
-from supercycletracker import assistant, records
-from supercycletracker.bot import TEXT_MAX, Bot, parse_callback, split_text
+from supercycletracker import assistant, cycle, records
+from supercycletracker.bot import (
+    TEXT_MAX,
+    Bot,
+    Interrupted,
+    parse_anotar,
+    parse_callback,
+    split_text,
+)
+from supercycletracker.i18n import Translator
 from supercycletracker.records import Day
+from supercycletracker.telegram import TelegramError
 
 FIXTURES = Path(__file__).parent / "fixtures"
 MADRID = ZoneInfo("Europe/Madrid")
@@ -863,3 +872,381 @@ def test_without_an_assistant_free_text_gets_no_ai_and_the_keyboard(make_bot):
     )
     assert buttons(answer["reply_markup"])[0] == "f:20270304:light"
     assert bot.kv.get_json(f"pending:{GROUP}") is None
+
+
+# --- commands ------------------------------------------------------------------------------
+
+
+def test_the_menu_is_set_once_with_her_five_commands(make_bot):
+    bot = make_bot()
+    bot.set_commands()
+    (call,) = bot.tg.of("setMyCommands")
+    assert [c["command"] for c in call["commands"]] == [
+        "hoy",
+        "resumen",
+        "anotar",
+        "deshacer",
+        "ayuda",
+    ]
+    assert "scope" not in call  # the default scope
+    assert all(c["description"] for c in call["commands"])
+
+
+def test_anotar_writes_a_day_without_the_assistant(make_bot):
+    bot = make_bot()  # 2027-03-04
+    say(bot, "/anotar ayer mucho 6 calambres")
+    got = day(bot, date(2027, 3, 3))
+    assert (got.flow, got.pain, got.symptoms, got.source) == (
+        "heavy",
+        6,
+        ("abdominal_cramps",),
+        "telegram",
+    )
+    assert bot.tg.texts()[-1] == (
+        "Anotado sin el asistente: miércoles 3 de marzo, mucho, dolor 6, calambres. "
+        "Si no es así, /deshacer."
+    )
+    assert plugin(bot).CALLS == []
+
+
+def test_anotar_by_an_admin_is_written_as_admin_and_the_red_flag_still_comes(make_bot):
+    bot = make_bot()
+    say(bot, "/log@example_cycle_bot hoy poco dolor 9", user=ADMIN)
+    got = day(bot, date(2027, 3, 4))
+    assert (got.flow, got.pain, got.source) == ("light", 9, "admin")
+    assert bot.tg.texts()[-1].startswith("Un dolor de 9 es mucho.")
+
+
+def test_anotar_refuses_what_it_does_not_understand(make_bot):
+    bot = make_bot()
+    before = bot.repo.log_path.read_bytes()
+    for text in (
+        "/anotar",
+        "/anotar ayer",  # nothing to note
+        "/anotar mañana mucho",
+        "/anotar ayer mucho 11",
+        "/anotar ayer mucho zanahorias",
+        "/anotar ayer dolor",  # three symptoms start with «dolor»
+        "/anotar 2026-11-01 poco",  # more than 90 days back
+        "/anotar 31/2 poco",
+    ):
+        say(bot, text)
+    assert bot.repo.log_path.read_bytes() == before
+    usage = "Uso: /anotar &lt;cuándo&gt; &lt;cuánto&gt; [dolor 0-10] [síntomas…]."
+    assert all(t.startswith(usage) for t in bot.tg.texts())
+    assert len(bot.tg.texts()) == 8
+
+
+def test_anotar_understands_weekdays_dates_and_labels_by_prefix():
+    t = Translator("es")
+    today = date(2027, 3, 4)  # a Thursday
+    assert parse_anotar("hoy nada", t, today) == (today, {"flow": "none"})
+    assert parse_anotar("anteayer normal", t, today)[0] == date(2027, 3, 2)
+    assert parse_anotar("miercoles poco", t, today)[0] == date(2027, 3, 3)
+    assert parse_anotar("jueves poco", t, today)[0] == date(2027, 2, 25)  # the past one
+    assert parse_anotar("lun poco", t, today)[0] == date(2027, 3, 1)
+    assert parse_anotar("28/2 poco", t, today)[0] == date(2027, 2, 28)
+    assert parse_anotar("5/3 poco", t, date(2027, 3, 10))[0] == date(2027, 3, 5)
+    assert parse_anotar("20/12 poco", t, date(2027, 1, 10))[0] == date(2026, 12, 20)
+    assert parse_anotar("2027-03-01 poco", t, today)[0] == date(2027, 3, 1)
+    d, fields = parse_anotar("Ayer Poquito 3 dolor de cabeza hinch nauseas", t, today)
+    assert (d, fields) == (
+        date(2027, 3, 3),
+        {"flow": "light", "pain": 3, "symptoms": ("bloating", "headache", "nausea")},
+    )
+    assert parse_anotar("hoy dolor lumbar", t, today)[1] == {"symptoms": ("lower_back_pain",)}
+    en = Translator("en")
+    assert parse_anotar("day before yesterday heavy pain 7", en, today) == (
+        date(2027, 3, 2),
+        {"flow": "heavy", "pain": 7},
+    )
+
+
+def test_deshacer_restores_the_batch_and_then_has_nothing_to_undo(make_bot):
+    bot = make_bot(today=date(2027, 3, 29))
+    before = bot.repo.log_path.read_bytes()
+    tap(bot, "y:20270329:medium")
+    tap(bot, "p:20270329:4")
+    say(bot, "/deshacer")
+    assert bot.repo.log_path.read_bytes() == before
+    assert bot.tg.texts()[-1] == "Deshecho: lunes 29 de marzo."
+    say(bot, "/undo")
+    assert bot.tg.texts()[-1] == "No hay nada que deshacer."
+
+
+def test_resumen_on_the_fictional_log(make_bot):
+    log = records.load(FIXTURES / "log_fictional.jsonl")
+    bot = make_bot(today=date(2025, 9, 10), log=log)
+    say(bot, "/resumen")
+    assert bot.tg.texts()[-1] == (
+        "Tu ciclo, Lucía:\n"
+        "• Última regla: 28 de agosto, 5 día(s) apuntado(s).\n"
+        "• Ciclos recientes: 32, 28, 34, 29, 27, 31 días (lo normal en ti: 30).\n"
+        "• Duración habitual: 4 días.\n"
+        "• Próxima: hacia el 27 de septiembre (entre el 24 de septiembre y el 1 de octubre).\n"
+        "• Lo que más anotas: calambres, dolor de cabeza, dolor lumbar."
+    )
+
+
+def test_resumen_with_too_few_cycles_leaves_the_lengths_out(make_bot):
+    bot = make_bot()  # two lengths in the seed
+    say(bot, "/summary")
+    text = bot.tg.texts()[-1]
+    assert "Ciclos recientes" not in text
+    assert "• Próxima: hacia el 29 de marzo" in text
+    bot2 = make_bot(log={})
+    say(bot2, "/resumen")
+    assert bot2.tg.texts()[-1] == "Aún no tengo datos suficientes."
+
+
+ESTADO_CASES = [
+    ("period", date(2027, 3, 4), None, "regla, día 4"),
+    ("quiet", date(2027, 3, 15), None, "tranquila hasta el 26 de marzo"),
+    ("waiting", date(2027, 3, 27), None, "esperando (del 26 de marzo al 1 de abril)"),
+    ("late", date(2027, 4, 5), None, "con retraso desde el 1 de abril"),
+    ("no_history", date(2027, 3, 4), {}, "sin historial"),
+]
+
+
+@pytest.mark.parametrize(("kind", "today", "log", "phase"), ESTADO_CASES)
+def test_estado_renders_every_phase_kind_through_its_locale_key(make_bot, kind, today, log, phase):
+    bot = make_bot(today=today, log=log)
+    assert bot.phase(bot.repo.load(), today).kind == kind
+    say(bot, "/estado", user=ADMIN)
+    assert bot.tg.texts()[-1] == (
+        f"Fase: {phase}. Hoy: aún no preguntado. Asistente: sin respuesta desde el arranque. "
+        "Datos: sincronizado."
+    )
+
+
+def test_the_estado_cases_cover_every_phase_kind():
+    assert sorted(c[0] for c in ESTADO_CASES) == sorted(cycle.KINDS)
+
+
+def test_estado_is_for_admins_only(make_bot):
+    bot = make_bot()
+    say(bot, "/estado")
+    say(bot, "/status", chat=HER, private=True)
+    assert bot.tg.texts() == []
+    say(bot, "/status@example_cycle_bot", user=ADMIN)
+    assert bot.tg.texts()[-1].startswith("Fase: regla, día 4.")
+
+
+def test_estado_tells_the_ask_the_assistant_and_unpushed_commits(make_bot):
+    bot = make_bot()
+    bot.kv.set("last_ask", "2027-03-04")
+    say(bot, "hola", reply_to=QUESTION)  # a turn that worked
+    bot.now.advance(minutes=90)
+    tap(bot, "f:20270304:heavy")
+    bot.repo.flush(force=True)  # committed and pushed
+    bot.repo._git("commit", "--allow-empty", "--quiet", "-m", "local")  # one not pushed
+    say(bot, "/estado", user=ADMIN)
+    assert bot.tg.texts()[-1] == (
+        "Fase: regla, día 4. Hoy: preguntado y respondido. Asistente: última respuesta hace 1 h. "
+        "Datos: 1 commit(s) sin subir."
+    )
+    bot.repo.remote_ok = False
+    bot.repo._git("reset", "--soft", "HEAD~1")
+    say(bot, "/estado", user=ADMIN)
+    assert bot.tg.texts()[-1].endswith("Datos: remoto inaccesible al arrancar.")
+
+
+def test_estado_without_an_assistant(make_bot):
+    bot = make_bot(profile=PROFILE.split("assistant:")[0])
+    bot.kv.set("last_ask", "2027-03-04")
+    say(bot, "/estado", user=ADMIN)
+    assert "Hoy: preguntado, sin respuesta. Asistente: sin asistente." in bot.tg.texts()[-1]
+
+
+def test_nuevo_clears_the_pending_lines_and_the_conversation(make_bot):
+    bot = make_bot()
+    mod = plugin(bot)
+    say(bot, "hola", reply_to=QUESTION)
+    assert bot.kv.get(f"conv:{GROUP}") == "conv-1"
+    mod.DOWN = True
+    say(bot, "uno", reply_to=QUESTION)
+    say(bot, "dos", reply_to=QUESTION)
+    assert len(bot.kv.get_json(f"pending:{GROUP}")) == 2
+    say(bot, "/nuevo", user=ADMIN)
+    assert bot.kv.get_json(f"pending:{GROUP}") is None
+    assert bot.kv.get(f"conv:{GROUP}") is None
+    assert mod.FORGOTTEN == ["conv-1"]
+    assert bot.tg.texts()[-1] == "Empiezo una conversación nueva. Lo apuntado sigue igual."
+    mod.DOWN = False
+    say(bot, "tres", reply_to=QUESTION)
+    assert mod.CALLS[-1]["turn"]["conversation"] is None
+    assert [x["content"].rsplit("] ", 1)[1] for x in mod.CALLS[-1]["turn"]["new"]] == ["tres"]
+
+
+def test_nuevo_is_for_admins_and_a_failed_forget_still_drops_the_conversation(make_bot):
+    bot = make_bot()
+    mod = plugin(bot)
+    say(bot, "hola", reply_to=QUESTION)
+    say(bot, "/nuevo")  # her: not an admin command for her
+    assert bot.kv.get(f"conv:{GROUP}") == "conv-1"
+    mod.forget = lambda conversation, settings: (_ for _ in ()).throw(RuntimeError("busy"))
+    say(bot, "/new", user=ADMIN)
+    assert bot.kv.get(f"conv:{GROUP}") is None
+    assert bot.tg.texts()[-1] == "Empiezo una conversación nueva. Lo apuntado sigue igual."
+    say(bot, "otra", reply_to=QUESTION)
+    assert mod.CALLS[-1]["turn"]["conversation"] is None
+
+
+def test_nuevo_during_a_turn_is_not_undone_when_the_turn_ends(make_bot):
+    bot = make_bot()
+    mod = plugin(bot)
+    say(bot, "hola", reply_to=QUESTION)
+    assert bot.kv.get(f"conv:{GROUP}") == "conv-1"
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(turn):
+        entered.set()
+        release.wait(5)
+        return {"text": "tarde", "conversation": "conv-1", "kept": True}
+
+    mod.REPLIES[:] = [slow]
+    bot.handle(
+        {
+            "message": {
+                "message_id": 3,
+                "from": {"id": HER},
+                "text": "uno",
+                "chat": {"id": GROUP, "type": "supergroup"},
+                "reply_to_message": {"from": {"id": BOT_ID}, "text": "x"},
+            }
+        }
+    )
+    assert entered.wait(5)
+    nuevo = {"message_id": 4, "from": {"id": ADMIN}, "text": "/nuevo"}
+    bot.handle({"message": {**nuevo, "chat": {"id": GROUP, "type": "supergroup"}}})
+    assert bot.kv.get(f"conv:{GROUP}") is None
+    release.set()
+    bot.worker.join_idle()
+    assert mod.FORGOTTEN == ["conv-1"]
+    assert bot.kv.get(f"conv:{GROUP}") is None
+    say(bot, "dos", reply_to=QUESTION)
+    assert mod.CALLS[-1]["turn"]["conversation"] is None
+
+
+def test_estado_without_an_upstream_does_not_claim_synced(make_bot):
+    bot = make_bot()
+    bot.repo._git("branch", "--unset-upstream")
+    bot.repo._git("commit", "--allow-empty", "--quiet", "-m", "local")
+    say(bot, "/estado", user=ADMIN)
+    assert bot.tg.texts()[-1].endswith(
+        "Datos: desconocido, no hay rama remota con la que comparar."
+    )
+
+
+def test_a_long_wait_ticks_every_minute_so_the_heartbeat_stays_fresh():
+    class Stop:
+        def __init__(self):
+            self.waits = []
+
+        def wait(self, timeout):
+            self.waits.append(timeout)
+            return False
+
+    for seconds, waits, ticks in ((300, [60] * 5, 4), (160, [60, 60, 40], 2), (30, [30], 0)):
+        stop, calls = Stop(), []
+        Bot.wait(stop, seconds, lambda calls=calls: calls.append(1))
+        assert (stop.waits, len(calls)) == (waits, ticks)
+
+
+def test_ayuda_and_presentacion(make_bot):
+    bot = make_bot()
+    say(bot, "/ayuda")
+    assert bot.tg.texts()[-1].startswith("Esto es lo que entiendo:")
+    assert "/estado" not in bot.tg.texts()[-1]
+    say(bot, "/help", user=ADMIN)
+    assert "Para administradores:\n/estado" in bot.tg.texts()[-1]
+    say(bot, "/presentacion")  # her: nothing
+    assert len(bot.tg.texts()) == 2
+    say(bot, "/about", user=ADMIN)
+    assert bot.tg.texts()[-1].startswith("Hola. Llevo la cuenta del ciclo de Lucía")
+    say(bot, "/presentacion", user=STRANGER)
+    assert len(bot.tg.texts()) == 3
+
+
+def test_migration_moves_the_bot_to_the_new_chat(make_bot):
+    bot = make_bot()
+    bot.handle({"message": {"chat": {"id": GROUP}, "migrate_to_chat_id": -100456}})
+    assert bot.chat_id == -100456
+    say(bot, "hola", chat=GROUP, reply_to=QUESTION)
+    assert plugin(bot).CALLS == []
+    say(bot, "hola", chat=-100456, reply_to=QUESTION)
+    assert len(plugin(bot).CALLS) == 1
+    bot.handle({"message": {"chat": {"id": -100999}, "migrate_to_chat_id": -100777}})
+    assert bot.chat_id == -100456  # another chat's migration is not ours
+
+
+# --- the loop ------------------------------------------------------------------------------
+
+
+def test_poll_handles_updates_and_keeps_the_offset(make_bot):
+    bot = make_bot()
+    bot.tg.updates = [
+        [
+            {"update_id": 41, "message": {"chat": {"id": GROUP}, "text": "x", "from": {"id": 7}}},
+            {"update_id": 42, "callback_query": {"id": "c", "from": {"id": HER}, "data": "bad"}},
+        ]
+    ]
+    assert bot.poll_once() == 0
+    assert bot.kv.get("offset") == "43"
+    assert bot.poll_once() == 0
+    assert bot.tg.of("getUpdates")[-1]["offset"] == 43
+    assert bot.tg.of("getUpdates")[-1]["allowed_updates"] == ["message", "callback_query"]
+
+
+def test_poll_waits_on_409_and_429_and_backs_off_on_5xx(make_bot):
+    bot = make_bot()
+    bot.kv.set("offset", "7")
+    bot.tg.fail_next("getUpdates", 409, "Conflict: terminated by other getUpdates request")
+    assert bot.poll_once() == 30
+    assert bot.kv.get("offset") == "7"
+    bot.tg.fail_next("getUpdates", 429, "Too Many Requests", {"retry_after": 12})
+    assert bot.poll_once() == 12
+    for expected in (5, 10, 20):
+        bot.tg.fail_next("getUpdates", 502, "Bad Gateway")
+        assert bot.poll_once() == expected
+    bot.tg.fail_next("getUpdates", 0, "URLError")
+    assert bot.poll_once() == 40
+    assert bot.poll_once() == 0  # a success resets the backoff
+    bot.tg.fail_next("getUpdates", 502, "Bad Gateway")
+    assert bot.poll_once() == 5
+    bot.tg.fail_next("getUpdates", 401, "Unauthorized")
+    with pytest.raises(TelegramError):
+        bot.poll_once()
+
+
+def test_a_bad_update_does_not_stop_the_loop(make_bot, monkeypatch):
+    bot = make_bot()
+    monkeypatch.setattr(bot, "on_message", lambda msg: 1 / 0)
+    bot.tg.updates = [[{"update_id": 5, "message": {}}]]
+    assert bot.poll_once() == 0
+    assert bot.kv.get("offset") == "6"
+
+
+def test_run_sets_up_once_and_flushes_at_once_on_sigterm(make_bot):
+    bot = make_bot()
+    flushes = []
+    bot.repo.flush = lambda force=False: flushes.append(force) or "idle"
+    stop = threading.Event()
+
+    def interrupted():
+        stop.set()
+        raise Interrupted  # what the SIGTERM handler raises mid long poll
+
+    bot.tg.updates = [[], interrupted]
+    bot.run(stop)
+    assert len(bot.tg.of("setMyCommands")) == 1
+    assert len(bot.tg.of("getUpdates")) == 2
+    assert flushes == [False, True]  # one tick, then the forced flush on the way out
+    assert bot.polling is False
+
+
+def test_run_stops_on_a_bad_token(make_bot):
+    bot = make_bot()
+    bot.tg.fail_next("getMe", 401, "Unauthorized")
+    with pytest.raises(TelegramError):
+        bot.run(threading.Event())

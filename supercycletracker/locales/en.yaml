@@ -67,11 +67,19 @@ status_ai_none: "no assistant configured"
 status_git_ok: "synced"
 status_git_unpushed: "{n} commit(s) not pushed"
 status_git_down: "remote unreachable at start"
+status_git_unknown: "unknown, no upstream branch to compare with"
 
 # --- commands ------------------------------------------------------------------------------
 anotar_usage: "Usage: /anotar &lt;when&gt; &lt;flow&gt; [pain 0-10] [symptoms…]. Example: /anotar yesterday heavy 6 cramps"
 anotar_saved: "Noted without the assistant: {summary}. If that is wrong, /deshacer."
 new_conversation: "Starting a fresh conversation. What is noted stays."
+test_mark: "(test)"
+menu:
+  hoy: "Today's question, or tell me something"
+  resumen: "Your cycle in a few lines"
+  anotar: "Note a day without the assistant"
+  deshacer: "Undo the last thing I noted"
+  ayuda: "What I understand"
 help: |-
   What I understand:
   /hoy: today's question; with text after it, you tell me
