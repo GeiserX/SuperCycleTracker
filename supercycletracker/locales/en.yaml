@@ -107,10 +107,11 @@ help_admin: |-
   /nuevo: start a fresh conversation with the assistant
   /presentacion: post the introduction
 intro: |-
-  Hello. I keep track of {name}'s cycle in this group.
-  On the days her period is likely, I ask in the evening with buttons: one tap is enough.
-  She can also reply to any of my messages in her own words, and I note it.
-  She can ask me about her cycle too; I answer with her own history in mind.
+  Hello. I am the bot that keeps track of {name}'s cycle in this group.
+  On the days her period is likely, I ask in the evening with buttons: one tap is enough. While it lasts, I ask every day how it is going, and about the day before too.
+  She can reply to any of my messages in her own words or with a voice note, and I note it.
+  She can ask me about her cycle or her health; I answer with her own history in mind and look things up in reliable sources.
+  If she wants to change something (the time I ask, how I work), she only has to ask me.
   What I note is kept in a private repository of this household. To understand what she writes and answer her questions, an AI assistant reads her messages and her history.
   /ayuda lists what I understand.
 

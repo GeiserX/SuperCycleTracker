@@ -39,7 +39,9 @@ def main(argv: list[str] | None = None) -> int:
     im.add_argument("export", type=Path, help="export.zip or export.xml")
     im.add_argument("--dry-run", action="store_true", help="count only, write nothing")
     say = sub.add_parser("say", parents=[data], help="send a message as the bot")
-    say.add_argument("--ask", action="store_true", help="today's card, marked as a test")
+    what = say.add_mutually_exclusive_group()
+    what.add_argument("--ask", action="store_true", help="today's card, marked as a test")
+    what.add_argument("--intro", action="store_true", help="the introduction, to the group")
     a = parser.parse_args(argv)
     return {
         "run": cmd_run,
@@ -158,9 +160,10 @@ def cmd_import(a) -> int:
 
 def cmd_say(a) -> int:
     """`--ask`: today's card marked as a test, without touching `last_ask`: the positive
-    control for a live deployment. It does not poll, so it is safe beside the running bot."""
-    if not a.ask:
-        print("say: nothing to send (use --ask)", file=sys.stderr)
+    control for a live deployment. `--intro`: the introduction (the text of /presentacion) to
+    the configured group. It does not poll, so it is safe beside the running bot."""
+    if not (a.ask or a.intro):
+        print("say: nothing to send (use --ask or --intro)", file=sys.stderr)
         return 2
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
@@ -175,13 +178,16 @@ def cmd_say(a) -> int:
         return 1
     bot = Bot(a.data, Telegram(token), profile=profile)
     try:
-        bot.send_card(bot.chat_id, bot.today(), " " + bot.t("test_mark"))
+        if a.intro:
+            bot.send(bot.chat_id, bot.intro_text())
+        else:
+            bot.send_card(bot.chat_id, bot.today(), " " + bot.t("test_mark"))
     except (TelegramError, ValueError) as e:
         print(f"say failed: {safe(e)}", file=sys.stderr)
         return 1
     finally:
         bot.close()
-    print("card sent")
+    print("intro sent" if a.intro else "card sent")
     return 0
 
 

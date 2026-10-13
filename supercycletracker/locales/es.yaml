@@ -105,10 +105,11 @@ help_admin: |-
   /nuevo: empezar una conversación nueva con el asistente
   /presentacion: publicar la presentación
 intro: |-
-  Hola. Llevo la cuenta del ciclo de {name} en este grupo.
-  Los días en que la regla puede llegarle, le pregunto por la noche con botones: basta con un toque.
-  También puede responder a cualquiera de mis mensajes con sus palabras, y lo anoto.
-  Puede preguntarme dudas sobre su ciclo; le contesto teniendo en cuenta su propio historial.
+  Hola. Soy el bot que lleva la cuenta del ciclo de {name} en este grupo.
+  Los días en que la regla puede llegarle, le pregunto por la noche con botones: basta con un toque. Mientras dura, pregunto cada día cómo va, y también por el día de antes.
+  Puede responder a cualquiera de mis mensajes con sus palabras o con una nota de voz, y lo anoto.
+  Puede preguntarme dudas sobre su ciclo o su salud; contesto teniendo en cuenta su propio historial y busco en fuentes fiables.
+  Si quiere cambiar algo (la hora a la que pregunto, cómo funciono), basta con pedírmelo.
   Lo que anoto se guarda en un repositorio privado de esta casa. Para entender lo que escribe y contestar sus dudas, un asistente de IA lee sus mensajes y su historial.
   /ayuda tiene la lista de lo que entiendo.
 

@@ -1305,7 +1305,11 @@ class Bot:
 
     def cmd_presentacion(self, msg: Mapping, rest: str, role: str) -> None:
         """/presentacion (admins): the introduction, posted when an admin asks for it."""
-        self.send(msg["chat"]["id"], self.t("intro", name=html.escape(self.profile.name)))
+        self.send(msg["chat"]["id"], self.intro_text())
+
+    def intro_text(self) -> str:
+        """The introduction (/presentacion and `sct say --intro`)."""
+        return self.t("intro", name=html.escape(self.profile.name))
 
     def cmd_ayuda(self, msg: Mapping, rest: str, role: str) -> None:
         text = self.t("help")

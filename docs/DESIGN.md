@@ -372,7 +372,7 @@ Nothing is set in BotFather, which this call would overwrite anyway.
 | `/deshacer` (`/undo`) | her, admins | undoes the last check-in: the uncommitted batch, else the last `log:` commit (2.2) |
 | `/estado` (`/status`) | admins | phase, whether today was asked and answered, the ask hour, when the assistant last answered, git sync state |
 | `/nuevo` (`/new`) | admins | drop the assistant conversation; the next turn starts fresh |
-| `/presentacion` (`/about`) | admins | posts the introduction text once, when an admin asks for it |
+| `/presentacion` (`/about`) | admins | posts the introduction text once, when an admin asks for it (`sct say --intro` posts the same text from the host) |
 | `/ayuda` (`/help`) | anyone allowed | the list |
 
 ## 5. From words to a record
@@ -829,7 +829,9 @@ with the same `{placeholders}`; every Spanish string containing `?` also contain
 `sct check --data <dir>` validates `profile.yaml` and every log line and reports `cycle_start` flags
 that differ from the recomputation (exit 1 on errors). `sct predict --data <dir> [--today D]` prints the
 prediction. `sct say --data <dir> --ask` sends today's card marked «(prueba)» without touching
-`last_ask`: the positive control for a live deployment.
+`last_ask`: the positive control for a live deployment. `sct say --data <dir> --intro` posts the
+introduction (the text of `/presentacion`) to the configured group and exits, for the day the bot
+joins a group or its abilities change.
 
 ## 11. Privacy
 
@@ -881,7 +883,7 @@ Each CI gate (ruff, pytest) is shown failing once on a mutated line before it is
 ```
 supercycletracker/
   __init__.py        __version__
-  cli.py             sct run | check | predict | import-apple-health | say
+  cli.py             sct run | check | predict | import-apple-health | say --ask | say --intro
   records.py         FLOWS, SYMPTOMS, load/save, derive_starts, validate_block, apply -> Change
   cycle.py           bot_day, predict, phase, queue; pure, today passed in
   i18n.py            Translator; locales/en.yaml, locales/es.yaml

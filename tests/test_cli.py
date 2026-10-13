@@ -136,6 +136,29 @@ def test_say_ask_sends_a_test_card_and_leaves_last_ask_alone(data, monkeypatch):
     kv.close()
 
 
+def test_say_intro_posts_the_introduction_to_the_group(data, monkeypatch):
+    sent = []
+
+    def fake(token):
+        tg = FakeTelegram()
+        sent.append(tg)
+        return tg
+
+    monkeypatch.setattr(telegram, "Telegram", fake)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "1:x")
+    code, out, err = sct("say", "--data", data, "--intro")
+    assert (code, out, err) == (0, "intro sent\n", "")
+    (intro,) = sent[0].of("sendMessage")
+    assert intro["chat_id"] == -100123
+    assert intro["text"].startswith(
+        "Hola. Soy el bot que lleva la cuenta del ciclo de Lucía en este grupo.\n"
+    )
+    assert intro["text"].endswith("/ayuda tiene la lista de lo que entiendo.")
+    assert "reply_markup" not in intro
+    with pytest.raises(SystemExit):  # one or the other
+        sct("say", "--data", data, "--intro", "--ask")
+
+
 def test_say_without_a_token_or_without_ask_refuses(data, monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     assert sct("say", "--data", data, "--ask")[0] == 2

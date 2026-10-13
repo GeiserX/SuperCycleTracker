@@ -14,8 +14,9 @@ SuperCycleTracker is a menstrual cycle tracker that lives in a Telegram group. I
 ## Features
 
 - Asks in the evening on the days her period is likely, based on her past cycles. One tap answers.
-- Checks in daily while the period lasts, up to 7 days or until she says it stopped, and asks once more for days that slipped by.
+- Checks in daily while the period lasts, up to day 7 (her setting) or until she says it stopped, and asks once more for days that slipped by. When a period starts, it also asks how the evening before went.
 - Logs flow, pain from 0 to 10, symptoms and a short note, from buttons or from her own words.
+- She changes the ask hour from the chat, in words or with `/hora 21:30`; the bot commits the profile change itself.
 - Predicts the next period from the logged history, and says so when a period closes.
 - Imports an Apple Health export to seed the history.
 - In the group it reads replies to the bot, answers to its questions, commands, and messages that mention it when Telegram delivers them; as a group admin it reads all of her messages. Voice notes from her or an admin are always heard, when the plugin can transcribe. It also answers private chats with her or an admin.
@@ -73,6 +74,7 @@ birth_date: 1993-05-02
 timezone: Europe/Madrid
 language: es
 ask_at: "21:00"             # between 05:00 and 23:59
+period_max_day: 7           # optional, 3..14: the last period day asked about daily
 telegram:
   chat_id: -100123          # the group
   user_id: 111              # whose cycle this is
@@ -92,13 +94,14 @@ assistant:                  # optional; without it the bot is buttons and comman
 | `/hoy` `[texto]` | her, admins | today's card; with text, the text goes to the assistant |
 | `/resumen` | her, admins | last period, recent cycles, usual length, next window |
 | `/anotar ayer mucho 6 calambres` | her, admins | note a day without the assistant |
+| `/hora 21:30` | her, admins | change the hour of the daily question |
 | `/deshacer` | her, admins | undo the last check-in |
 | `/ayuda` | her, admins | the list |
 | `/estado` | admins | phase, today's question, the assistant, git sync |
 | `/nuevo` | admins | start a fresh assistant conversation |
 | `/presentacion` | admins | post the introduction |
 
-English aliases work too: `/today`, `/summary`, `/log`, `/undo`, `/help`, `/status`, `/new`, `/about`.
+English aliases work too: `/today`, `/summary`, `/log`, `/time`, `/undo`, `/help`, `/status`, `/new`, `/about`. `sct say --intro` posts the introduction from the host.
 
 ## The assistant plugin
 
@@ -111,7 +114,7 @@ def forget(conversation: str, settings: dict) -> None: ...  # optional, called b
 def transcribe(audio: bytes, mime: str, language: str, settings: dict) -> str: ...
 ```
 
-`turn` has `conversation` (what the plugin returned last time in this chat, or `None`), `rules`, `context`, `files` (`{"cycle/log.jsonl": <whole file>}`) and `new` (her lines the plugin has not kept yet). `settings` is the `assistant:` block minus `plugin` and `instructions`. Return a string, or `{"text", "conversation", "kept", "later"}`; `later` is an optional callable the app runs on a background thread after posting the text, posting the string it returns. The text may end with one fenced `record` block. The app validates it, all or nothing, and writes the confirmation itself from what it saved. `kept: false` counts as a failed turn: nothing is applied and her lines go again with the next one. The plugin must return before `timeout_s`.
+`turn` has `conversation` (what the plugin returned last time in this chat, or `None`), `rules`, `context`, `files` (`{"cycle/log.jsonl": <whole file>}`) and `new` (her lines the plugin has not kept yet). `settings` is the `assistant:` block minus `plugin` and `instructions`. Return a string, or `{"text", "conversation", "kept", "later"}`; `later` is an optional callable the app runs on a background thread after posting the text, posting the string it returns. The text may end with one fenced `record` block, and one `settings` block when she asks to change the ask hour. The app validates each, all or nothing, and writes the confirmation itself from what it saved. `kept: false` counts as a failed turn: nothing is applied and her lines go again with the next one. The plugin must return before `timeout_s`.
 
 [`tests/fixtures/fake_plugin.py`](tests/fixtures/fake_plugin.py) is a scripted example. The full design is in [`docs/DESIGN.md`](docs/DESIGN.md).
 

@@ -1306,7 +1306,8 @@ def test_ayuda_and_presentacion(make_bot):
     say(bot, "/presentacion")  # her: nothing
     assert len(bot.tg.texts()) == 2
     say(bot, "/about", user=ADMIN)
-    assert bot.tg.texts()[-1].startswith("Hola. Llevo la cuenta del ciclo de Lucía")
+    assert bot.tg.texts()[-1].startswith("Hola. Soy el bot que lleva la cuenta del ciclo de Lucía")
+    assert "con una nota de voz" in bot.tg.texts()[-1]
     say(bot, "/presentacion", user=STRANGER)
     assert len(bot.tg.texts()) == 3
 
