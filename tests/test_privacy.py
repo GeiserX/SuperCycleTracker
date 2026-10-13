@@ -4,7 +4,8 @@ A full scripted flow runs with the log captured at DEBUG: a scheduled card walke
 the assistant answers with a record block, a block refused for a symptom that carries a planted
 word, a plugin that fails with her words in its exception, /anotar (and one it refuses, with a
 planted word), /resumen, /estado, /deshacer of a batch and of a pushed commit, /nuevo with a
-`forget` that fails with her words, and a git sync. None of her words, the assistant's words, the dates, the values or the names may
+`forget` that fails with her words, a voice note whose transcript carries a planted word, a `later`
+job that fails with her words, and a git sync. None of her words, the assistant's words, the dates, the values or the names may
 appear in the log. The same flow with one planted `log.info(text)` must go red.
 """
 
@@ -27,6 +28,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 GROUP, HER, ADMIN, BOT_ID = -100123, 111, 222, 999
 DAY = date(2027, 3, 27)  # inside the fictional seed's window
 PLANTED = "berenjenaplantada"
+HEARD = "zanahoriaescuchada"  # planted inside a voice note's transcript
 
 PROFILE = """\
 name: Lucía
@@ -57,6 +59,7 @@ SECRETS = [
     *HER_WORDS,
     *BOT_WORDS,
     PLANTED,
+    HEARD,
     "Lucía",
     "Marta",
     "lucia_example",
@@ -131,6 +134,25 @@ def scripted_flow(bot):
     ]
     for text in HER_WORDS:
         reply(bot, text)
+    bot.tg.files["voice-1"] = b"OggS fictional"
+    mod.VOICES[:] = [f"me noto rara, {HEARD}, desde ayer"]
+
+    def later():
+        raise RuntimeError(f"could not change it: {HER_WORDS[0]} {HEARD}")
+
+    mod.REPLIES[:] = [{"text": BOT_WORDS[1], "conversation": "conv-1", "later": later}]
+    bot.handle(
+        {
+            "message": {
+                "message_id": 77,
+                "from": {"id": HER},
+                "chat": {"id": GROUP, "type": "supergroup"},
+                "voice": {"file_id": "voice-1", "duration": 3, "mime_type": "audio/ogg"},
+            }
+        }
+    )
+    bot.worker.join_idle()
+    bot.later.join_idle()
     command(bot, "/anotar ayer poquito 3 hinchazón")
     command(bot, "/resumen")
     command(bot, "/estado", user=ADMIN)
@@ -195,6 +217,9 @@ def test_the_service_log_holds_no_words_dates_values_or_names(
     assert "undo committed" in caplog.text
     assert "anotar refused" in caplog.text
     assert "forget failed" in caplog.text
+    assert any(t.startswith("🎤") for t in texts)  # the voice note was heard
+    assert "voice heard" in caplog.text
+    assert "later failed: RuntimeError" in caplog.text
 
     found = [s for s in SECRETS if s.lower() in caplog.text.lower()]
     if planted:

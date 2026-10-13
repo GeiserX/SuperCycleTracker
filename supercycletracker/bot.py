@@ -3,7 +3,9 @@
 A tap is recorded at once, with no AI: each button carries its date and value, and the next step is
 computed from the log, never from a session table, so a stale keyboard still works and a restart
 mid-card loses nothing. Text meant for the bot is queued in SQLite (`pending:<chat>`) and one worker
-thread runs assistant turns, one at a time, so a tap is answered while the assistant thinks.
+thread runs assistant turns, one at a time, so a tap is answered while the assistant thinks. A voice
+note from her or an admin is queued the same way and turned into text by the plugin on that thread.
+Slow work a plugin hands back with its answer (`later`) runs on a second thread, one job at a time.
 
 The service log gets event kinds and counts only: never a message text, a date of a record or a
 value.
@@ -50,6 +52,9 @@ DEFAULT_SYMPTOMS = (
 )
 PAIN_HIGH = 8  # a day crossing into this pain or more posts `pain_high`
 TEXT_MAX = 4096  # Telegram's limit on one message, in UTF-16 code units
+VOICE_MAX = 20 * 1024 * 1024  # the largest file the Bot API lets a bot download
+ECHO_MAX = 4000  # the «🎤» echo of a transcript is cut to this, in UTF-16 code units
+ADMIN_STATUSES = frozenset({"administrator", "creator"})  # a group admin gets every message
 NOT_MODIFIED = "message is not modified"
 HER, ADMIN = "her", "admin"
 ASK_WINDOW = timedelta(hours=2)  # a bot that was down at ask_at still asks up to 2 h later
@@ -181,16 +186,18 @@ class Worker:
     """One thread that runs assistant turns, one at a time across all chats. A chat is queued
     once however many lines wait for it; a line that arrives mid-turn queues it again."""
 
-    def __init__(self, fn: Callable[[int], None]):
+    def __init__(self, fn: Callable, name: str = "sct-worker"):
         self._fn = fn
         self._cond = threading.Condition()
         self._queue: deque[int] = deque()
         self._busy = False
         self._stopped = False
-        self._thread = threading.Thread(target=self._loop, name="sct-worker", daemon=True)
+        self._thread = threading.Thread(target=self._loop, name=name, daemon=True)
         self._thread.start()
 
-    def submit(self, chat: int) -> None:
+    def submit(self, chat) -> None:
+        """Queue a chat (or, for the `later` runner, a job: each one is a new object, so none
+        is ever folded into another)."""
         with self._cond:
             if chat not in self._queue:
                 self._queue.append(chat)
@@ -345,14 +352,40 @@ class Bot:
             for name in names:
                 self.commands[name] = (handler, who)
         self.worker = Worker(self._turn)
+        # a plugin's slow work (`later`): one job at a time across every chat, in order; a
+        # restart loses what is queued or running
+        self.later = Worker(lambda job: job(), name="sct-later")
 
     def start(self) -> None:
+        """`getMe`, then `getChatMember` for the bot in the group: Telegram delivers every group
+        message to a bot that is privacy-off *or* a group administrator, and `getMe` only tells
+        the first. Either one turns on the privacy-off rule (`read_all`)."""
         me = self.tg.call("getMe") or {}
         self.bot_id = me.get("id")
         self.username = str(me.get("username") or "")
-        self.read_all = bool(me.get("can_read_all_group_messages"))
+        reasons = []
+        if me.get("can_read_all_group_messages"):
+            reasons.append("privacy mode off")
+        if self.group_admin():
+            reasons.append("group admin")
+        self.read_all = bool(reasons)
         log.info("bot @%s up", self.username)
-        log.info("group privacy %s", "off: every group message arrives" if self.read_all else "on")
+        if reasons:
+            log.info("group privacy off: every group message arrives (%s)", ", ".join(reasons))
+        else:
+            log.info("group privacy on")
+
+    def group_admin(self) -> bool:
+        """Whether the bot is an administrator (or the creator) of the configured group. A
+        failed call counts as no, so the bot still starts."""
+        if self.bot_id is None or self.chat_id is None:
+            return False
+        try:
+            member = self.tg.call("getChatMember", chat_id=self.chat_id, user_id=self.bot_id)
+        except TelegramError as e:
+            log.warning("getChatMember failed: %s", safe(e))
+            return False
+        return isinstance(member, Mapping) and member.get("status") in ADMIN_STATUSES
 
     def set_commands(self) -> None:
         """The menu: one `setMyCommands` in the default scope with the five she uses. The admin
@@ -366,6 +399,7 @@ class Bot:
 
     def close(self) -> None:
         self.worker.stop()
+        self.later.stop()
         self.kv.close()
 
     # --- small helpers -----------------------------------------------------------------
@@ -870,6 +904,9 @@ class Bot:
         if msg.get("migrate_to_chat_id") is not None:
             self.migrate(msg)
             return
+        if msg.get("voice") or msg.get("audio"):
+            self.on_voice(msg)
+            return
         text = msg.get("text")
         if not isinstance(text, str) or not text.strip():
             return
@@ -934,15 +971,57 @@ class Bot:
             raw = raw[:a] + raw[b:]
         return raw.decode("utf-16-le", "replace"), bool(spans)
 
+    def on_voice(self, msg: Mapping) -> None:
+        """A voice note (or an audio file) from her or an admin, in the group or a private chat.
+        It is always for the bot, whatever it replies to: a voice note cannot carry a mention.
+        It is queued like a text line and the worker turns it into one (`hear`)."""
+        chat = msg.get("chat") or {}
+        user = (msg.get("from") or {}).get("id")
+        role = self.role(user)
+        if role is None:
+            return
+        if chat.get("type") != "private" and chat.get("id") != self.chat_id:
+            return
+        media = msg.get("voice") or msg.get("audio")
+        if not isinstance(media, Mapping) or not media.get("file_id"):
+            return
+        note = {"message_id": msg.get("message_id"), "allow_sending_without_reply": True}
+        if not self.has_assistant:
+            self.post(chat["id"], self.t("voice_off"), reply_parameters=note)
+            log.info("voice without assistant")
+            return
+        size = media.get("file_size")
+        if isinstance(size, int) and size > VOICE_MAX:
+            self.post(chat["id"], self.t("voice_too_long"), reply_parameters=note)
+            log.info("voice refused: too_long")
+            return
+        voice = {"file_id": media["file_id"], "mime": str(media.get("mime_type") or "audio/ogg")}
+        line = {
+            "id": msg.get("message_id"),
+            "ts": int(self.now().timestamp()),
+            "voice": voice,
+            "who": self.who(role, user),
+            "admin": role == ADMIN,
+        }
+        self.queue_line(chat["id"], line)
+        log.info("voice queued")
+
     def queue_text(self, chat: int, msg: Mapping, content: str, role: str) -> None:
-        """Append a line to `pending:<chat>` (the newest 10, none older than 7 days) and queue
-        the chat for the worker. Without an assistant: «no_ai» with today's keyboard."""
+        """Append a line to `pending:<chat>` and queue the chat for the worker. Without an
+        assistant: «no_ai» with today's keyboard."""
         if not self.has_assistant:
             self.post(chat, self.t("no_ai"), self.today_keyboard())
             log.info("text without assistant")
             return
         now = int(self.now().timestamp())
         line = {"id": msg.get("message_id"), "ts": now, "content": content, "admin": role == ADMIN}
+        self.queue_line(chat, line)
+        log.info("text queued")
+
+    def queue_line(self, chat: int, line: dict) -> None:
+        """Append `line` to `pending:<chat>` (the newest 10, none older than 7 days) and queue
+        the chat for the worker."""
+        now = int(self.now().timestamp())
         dropped = []
 
         def add(lines):
@@ -955,7 +1034,6 @@ class Bot:
         self.kv.update_json(f"pending:{chat}", add, [])
         if dropped and dropped[0]:
             log.info("pending capped dropped=%d", dropped[0])
-        log.info("text queued")
         self.worker.submit(chat)
 
     def cmd_hoy(self, msg: Mapping, rest: str, role: str) -> None:
@@ -1247,7 +1325,8 @@ class Bot:
         stay). On an exception, a timeout or `kept: false`: «ai_down» with the keyboard, no
         block, and the lines stay for the next turn."""
         key = f"pending:{chat}"
-        lines = self.kv.get_json(key, []) or []
+        self.hear_all(chat, key)
+        lines = [x for x in self.kv.get_json(key, []) or [] if "content" in x]
         if not lines:
             return
         p = self.profile
@@ -1322,6 +1401,95 @@ class Bot:
         # nothing the second time
         taken = {x["id"] for x in lines}
         self.kv.update_json(key, lambda cur: [x for x in cur or [] if x["id"] not in taken] or None)
+        if reply.later is not None:
+            job = reply.later
+            self.later.submit(lambda: self.run_later(chat, job))
+            log.info("later queued")
+
+    def run_later(self, chat: int, job: Callable[[], str]) -> None:
+        """A plugin's `later` (on the later thread): its string goes to the chat as plain text,
+        nothing when it is empty; a failure posts «later_failed» and logs the class only."""
+        started = time.monotonic()
+        try:
+            out = job()
+            if not isinstance(out, str):
+                raise assistant.PluginError("bad_later")
+        except BaseException as e:  # noqa: BLE001 - the plugin may raise anything
+            log.warning("later failed: %s", safe(e))
+            self.post(chat, self.t("later_failed"))
+            return
+        log.info("later done %ds", round(time.monotonic() - started))
+        if out.strip():
+            self.say(chat, out.strip(), None)
+
+    # --- voice notes (worker thread) -----------------------------------------------------
+
+    def hear_all(self, chat: int, key: str) -> None:
+        """Turn every voice line waiting in `pending:<chat>` into a text line, oldest first. A
+        note that cannot be heard leaves the list, with its reason posted under it."""
+        for line in self.kv.get_json(key, []) or []:
+            if "voice" not in line:
+                continue
+            content = self.hear(chat, line)
+
+            def settle(cur, line_id=line["id"], content=content):
+                out = []
+                for x in cur or []:
+                    if x.get("id") == line_id and "voice" in x:
+                        if content is None:
+                            continue
+                        x = {k: v for k, v in x.items() if k not in ("voice", "who")}
+                        x["content"] = content
+                    out.append(x)
+                return out or None
+
+            self.kv.update_json(key, settle)
+
+    def hear(self, chat: int, line: Mapping) -> str | None:
+        """One voice note: `getFile`, the download, the plugin's `transcribe`, then the «🎤»
+        echo under the note. The line for the assistant, or None after posting why not:
+        «voice_off» (no plugin, no `transcribe`, or `NotImplementedError`), «voice_too_long»
+        (over 20 MiB) or «voice_failed» (anything else, an empty transcript too)."""
+        p = self.profile
+        block = p.assistant or {}
+        voice = line["voice"]
+        note = {"message_id": line["id"], "allow_sending_without_reply": True}
+        reason = "voice_failed"
+        text = ""
+        try:
+            info = self.tg.call("getFile", file_id=voice["file_id"])
+            info = info if isinstance(info, Mapping) else {}
+            size, path = info.get("file_size"), info.get("file_path")
+            if isinstance(size, int) and size > VOICE_MAX:
+                raise TelegramError("getFile", 413, "file too large")
+            if not isinstance(path, str) or not path:
+                raise TelegramError("getFile", 0, "no file path")
+            audio = self.tg.download(path, VOICE_MAX)
+            text = assistant.transcribe(
+                self.data,
+                block.get("plugin"),
+                audio,
+                voice["mime"],
+                p.language,
+                assistant.settings(block),
+            ).strip()
+        except NotImplementedError:
+            reason = "voice_off"
+        except TelegramError as e:
+            log.warning("voice failed: %s", safe(e))
+            too_big = e.code == 413 or "too big" in e.description.lower()
+            reason = "voice_too_long" if too_big else "voice_failed"
+        except Exception as e:  # noqa: BLE001 - the plugin may raise anything
+            log.warning("voice failed: %s", safe(e))
+        if not text:
+            log.info("voice not heard: %s", reason)
+            self.post(chat, self.t(reason), reply_parameters=note)
+            return None
+        log.info("voice heard")
+        echo = split_text(text, ECHO_MAX)
+        shown = echo[0] + ("…" if len(echo) > 1 else "")
+        self.post(chat, self.t("voice_echo", text=html.escape(shown)), reply_parameters=note)
+        return f"{line.get('who') or ''}: [voice note] {text}"
 
     def say(self, chat: int, text: str, reply_to: int | None) -> bool:
         """An assistant answer: plain text, a reply to her message, split at Telegram's limit.

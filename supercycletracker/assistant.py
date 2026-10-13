@@ -3,7 +3,8 @@
 The plugin is one Python file in the data directory (`profile.yaml` `assistant.plugin`). The app
 never knows which provider sits behind it: it hands over the rules, a fresh `context.md`, the whole
 log and her new lines, and takes back text that may end with one fenced `record` block. The app,
-not the assistant, validates and applies that block.
+not the assistant, validates and applies that block. A plugin may also turn a voice note into text
+(`transcribe`) and hand back slow work to finish after its answer is posted (`later`).
 
 Nothing here logs: errors are `PluginError` reason codes, and a plugin's own exception goes up to
 the caller, which logs its class only (`telegram.safe`).
@@ -18,7 +19,7 @@ import re
 import statistics
 import sys
 import threading
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from functools import lru_cache
@@ -125,34 +126,37 @@ class Reply:
     text: str
     conversation: str | None = None
     kept: bool = True
+    later: Callable[[], str] | None = None  # slow work the app runs after posting `text`
 
 
 def reply(out: object) -> Reply:
-    """A plugin's return value: a bare string, or `{"text", "conversation", "kept"}`."""
+    """A plugin's return value: a bare string, or `{"text", "conversation", "kept", "later"}`."""
     if isinstance(out, str):
         return Reply(out)
     if isinstance(out, Mapping):
         text, conversation, kept = out.get("text"), out.get("conversation"), out.get("kept", True)
+        later = out.get("later")
         if not isinstance(text, str) or not isinstance(kept, bool):
             raise PluginError("bad_reply")
         if conversation is not None and not isinstance(conversation, str):
             raise PluginError("bad_reply")
-        return Reply(text, conversation or None, kept)
+        if later is not None and not callable(later):
+            raise PluginError("bad_reply")
+        return Reply(text, conversation or None, kept, later)
     raise PluginError("bad_reply")
 
 
 _ABANDONED: dict[str, threading.Thread] = {}  # per plugin path: a call that outlived its wait
 
 
-def converse(data: str | Path, rel: str | None, turn: dict, plugin_settings: dict) -> Reply:
-    """Run the plugin's `converse` and wait at most `timeout_s`.
+def _call(data: str | Path, rel: str | None, fn: Callable, args: tuple, plugin_settings: dict):
+    """Run a plugin function in its own daemon thread and wait at most `timeout_s`.
 
-    The call runs in its own daemon thread because the app cannot stop a plugin: one that
-    outlives the wait is abandoned and the turn counts as failed (`PluginError("timeout")`).
-    Until that call returns, the plugin is not called again (`PluginError("plugin_busy")`), so
-    it never runs two turns at once. The plugin's own exception is raised as it is; an exit that
-    is not an `Exception` (`SystemExit`, `KeyboardInterrupt`) becomes `PluginError("plugin_aborted")`."""
-    fn = function(data, rel, "converse")
+    The app cannot stop a plugin: a call that outlives the wait is abandoned and counts as
+    failed (`PluginError("timeout")`). Until that call returns, the plugin is not called again
+    (`PluginError("plugin_busy")`), so it never runs two calls at once. The plugin's own
+    exception is raised as it is; an exit that is not an `Exception` (`SystemExit`,
+    `KeyboardInterrupt`) becomes `PluginError("plugin_aborted")`."""
     key = str((Path(data) / str(rel)).resolve())
     previous = _ABANDONED.get(key)
     if previous is not None and previous.is_alive():
@@ -161,7 +165,7 @@ def converse(data: str | Path, rel: str | None, turn: dict, plugin_settings: dic
 
     def run():
         try:
-            box["out"] = fn(turn, plugin_settings)
+            box["out"] = fn(*args, plugin_settings)
         except BaseException as e:  # noqa: BLE001 - handed to the caller as it is
             box["error"] = e
 
@@ -177,7 +181,32 @@ def converse(data: str | Path, rel: str | None, turn: dict, plugin_settings: dic
         if not isinstance(error, Exception):  # SystemExit and the like must not end the worker
             raise PluginError("plugin_aborted")
         raise error
-    return reply(box.get("out"))
+    return box.get("out")
+
+
+def converse(data: str | Path, rel: str | None, turn: dict, plugin_settings: dict) -> Reply:
+    """Run the plugin's `converse` and wait at most `timeout_s` (see `_call`)."""
+    fn = function(data, rel, "converse")
+    return reply(_call(data, rel, fn, (turn,), plugin_settings))
+
+
+def transcribe(
+    data: str | Path, rel: str | None, audio: bytes, mime: str, language: str, plugin_settings: dict
+) -> str:
+    """A voice note's text from the plugin's optional `transcribe`, with the same wait as a turn.
+
+    Raises `NotImplementedError` when there is no plugin or it defines no `transcribe` (as the
+    plugin itself does when its provider cannot listen), `PluginError("bad_transcript")` when it
+    returns something that is not a string, and anything else the plugin raises as it is."""
+    if not rel:
+        raise NotImplementedError
+    fn = function(data, rel, "transcribe", required=False)
+    if fn is None:
+        raise NotImplementedError
+    out = _call(data, rel, fn, (audio, mime, language), plugin_settings)
+    if not isinstance(out, str):
+        raise PluginError("bad_transcript")
+    return out
 
 
 def forget(data: str | Path, rel: str | None, conversation: str, plugin_settings: dict) -> None:

@@ -8,6 +8,12 @@ The app loads it from the data directory like any plugin. A test reaches the loa
   returns one of those. With the list empty the plugin answers «Vale.» and keeps the turn.
 - `DOWN`: while true every call raises, as a provider that is down.
 - `CALLS`: every turn and settings received; `FORGOTTEN`: every conversation dropped.
+- `VOICES`: what the next `transcribe` calls return, in order (a string, or an exception that is
+  raised). With the list empty `transcribe` raises `NotImplementedError`, as a provider that cannot
+  listen. `HEARD`: every `(audio, mime, language)` received.
+
+A reply dict may carry `later`, a callable with no arguments that returns a string: the app runs
+it after posting the text.
 """
 
 import copy
@@ -15,6 +21,8 @@ import copy
 REPLIES: list = []
 CALLS: list = []
 FORGOTTEN: list = []
+VOICES: list = []
+HEARD: list = []
 DOWN = False
 
 
@@ -36,3 +44,13 @@ def converse(turn, settings):
 
 def forget(conversation, settings):
     FORGOTTEN.append(conversation)
+
+
+def transcribe(audio, mime, language, settings):
+    HEARD.append((audio, mime, language))
+    if not VOICES:
+        raise NotImplementedError
+    out = VOICES.pop(0)
+    if isinstance(out, BaseException):
+        raise out
+    return out
