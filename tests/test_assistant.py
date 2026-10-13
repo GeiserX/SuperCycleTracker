@@ -125,10 +125,47 @@ def test_a_reply_that_breaks_the_contract_is_refused():
         {"text": 1},
         {"text": "x", "kept": "no"},
         {"text": "x", "conversation": 4},
+        {"text": "x", "later": "not a function"},
     ):
         with pytest.raises(PluginError, match="bad_reply"):
             assistant.reply(bad)
     assert assistant.reply({"text": "x", "kept": False}) == assistant.Reply("x", None, False)
+
+
+def test_a_reply_may_carry_later():
+    def job():
+        return "hecho"
+
+    out = assistant.reply({"text": "Me pongo.", "conversation": "c", "later": job})
+    assert out == assistant.Reply("Me pongo.", "c", True, job)
+    assert assistant.reply({"text": "x", "later": None}).later is None
+
+
+def test_transcribe_returns_the_plugins_text(data):
+    mod = assistant.load_module(data, "plugins/fake.py")
+    mod.VOICES[:] = ["me ha bajado hoy"]
+    out = assistant.transcribe(data, "plugins/fake.py", b"ogg", "audio/ogg", "es", {"timeout_s": 5})
+    assert out == "me ha bajado hoy"
+    assert mod.HEARD == [(b"ogg", "audio/ogg", "es")]
+
+
+def test_transcribe_is_optional_and_a_provider_may_refuse_it(data):
+    with pytest.raises(NotImplementedError):  # the fake with nothing scripted cannot listen
+        assistant.transcribe(data, "plugins/fake.py", b"x", "audio/ogg", "es", {})
+    (data / "plugins" / "bare.py").write_text("def converse(turn, settings):\n    return 'x'\n")
+    with pytest.raises(NotImplementedError):  # no transcribe at all
+        assistant.transcribe(data, "plugins/bare.py", b"x", "audio/ogg", "es", {})
+    with pytest.raises(NotImplementedError):  # no plugin configured
+        assistant.transcribe(data, None, b"x", "audio/ogg", "es", {})
+
+
+def test_transcribe_refuses_what_is_not_text_and_passes_errors_up(data):
+    mod = assistant.load_module(data, "plugins/fake.py")
+    mod.VOICES[:] = [None, KeyError("boom")]
+    with pytest.raises(PluginError, match="bad_transcript"):
+        assistant.transcribe(data, "plugins/fake.py", b"x", "audio/ogg", "es", {})
+    with pytest.raises(KeyError):
+        assistant.transcribe(data, "plugins/fake.py", b"x", "audio/ogg", "es", {})
 
 
 def test_a_plugin_that_outlives_its_time_is_a_timeout(data):
