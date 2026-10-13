@@ -65,7 +65,7 @@ status_git_unpushed: "{n} commit(s) not pushed"
 status_git_down: "remote unreachable at start"
 
 # --- commands ------------------------------------------------------------------------------
-anotar_usage: "Usage: /anotar &lt;when&gt; &lt;flow&gt; [pain 0-10] [symptoms…]. Example: /anotar ayer mucho 6 calambres"
+anotar_usage: "Usage: /anotar &lt;when&gt; &lt;flow&gt; [pain 0-10] [symptoms…]. Example: /anotar yesterday heavy 6 cramps"
 anotar_saved: "Noted without the assistant: {summary}. If that is wrong, /deshacer."
 new_conversation: "Starting a fresh conversation. What is noted stays."
 help: |-
@@ -86,7 +86,7 @@ intro: |-
   On the days her period is likely, I ask in the evening with buttons: one tap is enough.
   She can also reply to any of my messages in her own words, and I note it.
   She can ask me about her cycle too; I answer with her own history in mind.
-  What I note goes to a private repository of this household and nowhere else.
+  What I note is kept in a private repository of this household. To understand what she writes and answer her questions, an AI assistant reads her messages and her history.
   /ayuda lists what I understand.
 
 # --- buttons -------------------------------------------------------------------------------
@@ -140,10 +140,10 @@ days_short: [Mon, Tue, Wed, Thu, Fri, Sat, Sun]
 months: [January, February, March, April, May, June, July, August, September, October, November, December]
 date_long: "{weekday} {day} {month}"
 date_short: "{day} {month}"
-date_day: "{weekday} {day}"
 date_pick: "{weekday} {day}"
 
 # --- words /anotar understands -------------------------------------------------------------
+# An entry may be several words ("day before yesterday"): the parser matches whole phrases.
 words_flow:
   none: [none, nothing]
   light: [light]

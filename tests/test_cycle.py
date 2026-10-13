@@ -3,6 +3,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from supercycletracker import cycle, records
 from supercycletracker.cycle import bot_day, phase, predict, queue
 from supercycletracker.records import Day
@@ -255,6 +257,16 @@ def test_quiet_waiting_late_and_their_exits():
     # exit from quiet: an early start opens the period at once
     early = with_days(log, ("2027-04-20", "heavy"))
     assert phase(early, d("2027-04-20")).kind == "period"
+
+
+def test_kinds_is_exactly_what_phase_returns():
+    """`cycle.KINDS` drives the locale check; it must match what `phase()` really produces."""
+    log = history("2027-01-01", [30, 30, 30])
+    days = ("2027-04-02", "2027-04-28", "2027-04-29", "2027-05-04")
+    seen = {phase({}, d("2027-01-01")).kind} | {phase(log, d(s)).kind for s in days}
+    assert seen == set(cycle.KINDS)
+    with pytest.raises(ValueError, match="unknown_phase_kind"):  # a new kind must join KINDS
+        cycle.Phase("brand_new", None, None, (), None)
 
 
 def test_spotting_does_not_open_a_period():

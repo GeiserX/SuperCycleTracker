@@ -3,9 +3,10 @@ import string
 from datetime import date
 
 import pytest
+import yaml
 
-from supercycletracker import cycle, records
-from supercycletracker.i18n import Translator, _load, available
+from supercycletracker import cycle, i18n, records
+from supercycletracker.i18n import Translator, _load
 
 ALLOWED_TAG = re.compile(r"</?(b|i|u|s|code)>")
 ENTITY = re.compile(r"&(lt|gt|amp|quot);")
@@ -38,12 +39,22 @@ def shape(value):
     return type(value).__name__
 
 
+def _paired(s: str, opening: str, closing: str) -> bool:
+    """Every `closing` has its own `opening` before it, and none is left open."""
+    depth = 0
+    for ch in s:
+        depth += (ch == opening) - (ch == closing)
+        if depth < 0:
+            return False
+    return depth == 0
+
+
 def inverted_marks(strings: dict) -> list[str]:
-    """Spanish strings with a «?» but no «¿», or a «!» but no «¡»."""
+    """Spanish strings where a «?» lacks its own «¿» before it, or a «!» its «¡»."""
     bad = []
     for key, value in strings.items():
         for path, s in walk(value, key):
-            if ("?" in s and "¿" not in s) or ("!" in s and "¡" not in s):
+            if not (_paired(s, "¿", "?") and _paired(s, "¡", "!")):
                 bad.append(path)
     return bad
 
@@ -52,7 +63,8 @@ def inverted_marks(strings: dict) -> list[str]:
 
 
 def test_english_and_spanish_ship():
-    assert {"en", "es"} <= set(available())
+    for locale in ("en", "es"):
+        assert (i18n.LOCALES / f"{locale}.yaml").is_file()
 
 
 @pytest.mark.parametrize("locale", ["es"])
@@ -74,7 +86,9 @@ def test_inverted_marks_check_can_fail():
     """Positive control: the check above reports a broken string, and a fixed one passes."""
     assert inverted_marks({"x": "Ha llegado?"}) == ["x"]
     assert inverted_marks({"x": {"y": ["Qué bien!"]}}) == ["x.y[0]"]
-    assert inverted_marks({"x": "¿Ha llegado?"}) == []
+    assert inverted_marks({"x": "¿Algo más? Te duele?"}) == ["x"]  # second question unopened
+    assert inverted_marks({"x": "Ha llegado?¿"}) == ["x"]  # opened after it closed
+    assert inverted_marks({"x": "¿Ha llegado? ¡Qué bien! ¿Te duele?"}) == []
 
 
 @pytest.mark.parametrize("locale", ["en", "es"])
@@ -113,7 +127,6 @@ def test_dates():
     assert es.date(wednesday) == "miércoles 10 de marzo"
     assert en.date(wednesday) == "Wednesday 10 March"
     assert es.date(wednesday, "short") == "10 de marzo"
-    assert es.date(wednesday, "day") == "miércoles 10"
     assert es.date(wednesday, "pick") == "mié 10"
     with pytest.raises(ValueError):
         es.date(wednesday, "weird")
@@ -126,6 +139,21 @@ def test_labels_and_formatting():
     assert es.symptom("abdominal_cramps") == "calambres"
     assert es("pain", n=4) == "dolor 4"
     assert es("ask_period", m="@someone", n=2) == "@someone, día 2 de la regla. ¿Cómo va hoy?"
+
+
+def test_a_missing_label_falls_back_to_english_one_entry_at_a_time(tmp_path, monkeypatch):
+    en = _load("en")
+    partial = {"flows": {"light": "poquito"}, "symptoms": {"acne": "granos"}}
+    (tmp_path / "en.yaml").write_text(yaml.safe_dump(en, allow_unicode=True), encoding="utf-8")
+    (tmp_path / "xx.yaml").write_text(yaml.safe_dump(partial, allow_unicode=True))
+    monkeypatch.setattr(i18n, "LOCALES", tmp_path)
+    _load.cache_clear()
+    try:
+        t = Translator("xx")
+        assert t.flow("light") == "poquito" and t.flow("heavy") == "heavy"
+        assert t.symptom("acne") == "granos" and t.symptom("nausea") == "nausea"
+    finally:
+        _load.cache_clear()
 
 
 def test_unknown_locale_falls_back_to_english():

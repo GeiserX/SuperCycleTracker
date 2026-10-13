@@ -84,7 +84,7 @@ intro: |-
   Los días en que la regla puede llegarle, le pregunto por la noche con botones: basta con un toque.
   También puede responder a cualquiera de mis mensajes con sus palabras, y lo anoto.
   Puede preguntarme dudas sobre su ciclo; le contesto teniendo en cuenta su propio historial.
-  Lo que anoto va a un repositorio privado de esta casa y a ningún otro sitio.
+  Lo que anoto se guarda en un repositorio privado de esta casa. Para entender lo que escribe y contestar sus dudas, un asistente de IA lee sus mensajes y su historial.
   /ayuda tiene la lista de lo que entiendo.
 
 # --- buttons -------------------------------------------------------------------------------
@@ -138,7 +138,6 @@ days_short: [lun, mar, mié, jue, vie, sáb, dom]
 months: [enero, febrero, marzo, abril, mayo, junio, julio, agosto, septiembre, octubre, noviembre, diciembre]
 date_long: "{weekday} {day} de {month}"
 date_short: "{day} de {month}"
-date_day: "{weekday} {day}"
 date_pick: "{weekday} {day}"
 
 # --- words /anotar understands -------------------------------------------------------------

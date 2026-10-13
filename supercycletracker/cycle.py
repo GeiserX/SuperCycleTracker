@@ -54,6 +54,10 @@ class Phase:
     missing: tuple[date, ...]  # period days the bot still wants, oldest first
     prediction: Prediction | None
 
+    def __post_init__(self):
+        if self.kind not in KINDS:  # a new kind needs its phase_ locale key: add it to KINDS
+            raise ValueError("unknown_phase_kind")
+
 
 def _upto(log: Mapping[date, Day], today: date) -> dict[date, Day]:
     return {d: day for d, day in log.items() if d <= today}
