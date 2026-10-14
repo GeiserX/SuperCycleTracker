@@ -89,6 +89,8 @@ block, and nothing after it:
 ```
 - At most five, each a few words (40 characters at most), in {language_name}. For a yes-or-no
   question offer exactly the two words for yes and no.
+- A tap is an action. The way to decline is the word for no (Sí / No), never «Nada» or «Nothing»:
+  «nada» only describes what happens when nobody taps, and the bot writes that line itself.
 - Ask the question in your answer as usual; the bot shows the buttons under it and adds a line
   saying she may also answer in her own words, so do not write that line.
 - A tap reaches you as her next message, with the label as its text. Nothing waits for a tap: she
