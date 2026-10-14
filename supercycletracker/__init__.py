@@ -1,3 +1,3 @@
 """SuperCycleTracker: a menstrual cycle tracker that lives in a Telegram group."""
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"

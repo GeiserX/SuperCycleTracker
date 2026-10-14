@@ -391,6 +391,8 @@ def test_context_with_no_history():
 
 
 def test_rules_say_a_decline_button_is_no_never_nada():
-    # Sergio, 2026-10-14: a tap is an action, so «Nada» never labels a button; the rule is the bot's own knowledge
+    # A tap is an action, so «Nada» never labels a button: the shared principles say it, and the
+    # reminder offer's buttons are named with "no", never "nothing"
     text = assistant.rules("Lucía", "es", ["Marta"], "")
-    assert "never «Nada»" in text and "Sí / No" in text
+    assert "Nunca\n   «Nada» en un botón" in text
+    assert "in her calendar or no." in text and "or nothing" not in text

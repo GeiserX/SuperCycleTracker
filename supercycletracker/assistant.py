@@ -29,7 +29,7 @@ import threading
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from types import ModuleType
 from zoneinfo import ZoneInfo
@@ -39,6 +39,7 @@ from supercycletracker.i18n import Translator
 from supercycletracker.records import SYMPTOMS, Day
 
 RULES = Path(__file__).parent / "rules.md"
+PRINCIPLES = Path(__file__).parent / "principles"  # the shared assistant principles, per language
 LOG_KEY = "cycle/log.jsonl"
 DEFAULT_TIMEOUT_S = 600
 CALENDAR_DAYS = 14
@@ -371,11 +372,13 @@ def rules(
     instructions: str = "",
     her_text: bool = False,
 ) -> str:
-    """`rules.md` filled in. Plain replacement, not `str.format`: the text holds JSON braces.
+    """The shared assistant principles in her language, then `rules.md` filled in. Plain
+    replacement, not `str.format`: the text holds JSON braces.
     `her_text`: every message she writes in the group reaches the assistant, mention or not."""
     reach = (
         f"In the group, every message {name} writes reaches you too, because the group is about "
-        f"her cycle; the others' messages reach you only in those three ways."
+        f"her cycle; the others' messages reach you only when they mention you, reply to you or "
+        f"send a voice note."
         if her_text
         else "Text without a mention or a reply does not reach you as a message."
     )
@@ -390,7 +393,18 @@ def rules(
     text = RULES.read_text(encoding="utf-8")
     for key, value in values.items():
         text = text.replace("{" + key + "}", value)
-    return text.rstrip() + "\n"
+    return principles(language) + "\n" + text.rstrip() + "\n"
+
+
+@cache
+def principles(language: str) -> str:
+    """The shared assistant principles in `language` (English when there is no copy in it). They
+    come first: the rules after them say how they apply to this bot."""
+    lang = (language or "en").split("-")[0].split("_")[0].lower()
+    path = PRINCIPLES / f"{lang}.md"
+    if not path.is_file():
+        path = PRINCIPLES / "en.md"
+    return path.read_text(encoding="utf-8").rstrip() + "\n"
 
 
 def extract(text: str, kind: str = "record") -> tuple[str, object]:
