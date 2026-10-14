@@ -502,7 +502,9 @@ def test_choices_come_as_buttons_and_a_tap_is_her_next_message(make_bot):
     ]
     say(bot, "me ha bajado", reply_to=QUESTION)
     post = sent(bot)[-1]
-    assert post["text"] == "¿Cuánto has sangrado hoy?\n\nO cuéntame otra cosa."
+    assert post["text"] == (
+        "¿Cuánto has sangrado hoy?\n\nO cuéntame otra cosa. Si no respondes, no hago nada."
+    )
     data = buttons(post["reply_markup"])
     assert [b[0]["text"] for b in post["reply_markup"]["inline_keyboard"]] == [
         "Poco",
@@ -529,5 +531,7 @@ def test_a_yes_or_no_question_says_she_may_answer_otherwise(make_bot):
     ]
     say(bot, "hoy normal", reply_to=QUESTION)
     post = sent(bot)[-1]
-    assert post["text"].endswith("Toca Sí o No. Si quieres otra cosa, responde a este mensaje.")
+    assert post["text"].endswith(
+        "Toca Sí o No. Si quieres otra cosa, responde a este mensaje. Si no respondes, no hago nada."
+    )
     assert "force_reply" not in post["reply_markup"]

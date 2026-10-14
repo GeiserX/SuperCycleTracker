@@ -89,6 +89,7 @@ menu:
   anotar: "Anotar un día sin el asistente"
   hora: "Cambiar la hora a la que pregunto"
   deshacer: "Deshacer lo último que anoté"
+  recordatorios: "Los recordatorios pendientes, para cancelarlos"
   ayuda: "Lo que entiendo"
 help: |-
   Esto es lo que entiendo:
@@ -97,6 +98,7 @@ help: |-
   /anotar ayer mucho 6 calambres: anotar un día sin el asistente
   /hora 21:30: cambiar la hora a la que pregunto
   /deshacer: deshacer lo último que anoté
+  /recordatorios: los recordatorios pendientes, para cancelarlos
   /ayuda: esta lista
   También puedes responder a cualquiera de mis mensajes.
 help_admin: |-
@@ -110,6 +112,7 @@ intro: |-
   Puede responder a cualquiera de mis mensajes con sus palabras o con una nota de voz, y lo anoto.
   Puede preguntarme dudas sobre su ciclo o su salud; contesto teniendo en cuenta su propio historial y busco en fuentes fiables.
   Si quiere cambiar algo (la hora a la que pregunto, cómo funciono), basta con pedírmelo.
+  Cuando puedo hacer algo por ella (un recordatorio, apuntar la previsión del ciclo en su calendario), se lo ofrezco con botones; si no responde, no hago nada. /recordatorios enseña los que hay y deja cancelarlos.
   Lo que anoto se guarda en un repositorio privado de esta casa. Para entender lo que escribe y contestar sus dudas, un asistente de IA lee sus mensajes y su historial.
   /ayuda tiene la lista de lo que entiendo.
 
@@ -183,8 +186,8 @@ button_yes: "Sí"
 button_no: "No"
 button_approve: "Aprobar"
 button_reject: "Rechazar"
-options_hint: "O cuéntame otra cosa."
-yes_no_hint: "Toca Sí o No. Si quieres otra cosa, responde a este mensaje."
+options_hint: "O cuéntame otra cosa. Si no respondes, no hago nada."
+yes_no_hint: "Toca Sí o No. Si quieres otra cosa, responde a este mensaje. Si no respondes, no hago nada."
 tap_gone: "Esto ya no está esperando respuesta."
 tap_not_yours: "Esto solo lo puede responder {name}."
 ask_confirm: "{name}, ¿lo apruebas?\n{summary}"
@@ -192,3 +195,31 @@ ask_done: "Hecho."
 ask_failed: "Falló: {error}"
 ask_failed_unknown: "No ha salido bien."
 ask_edited: "Has editado tu mensaje, así que no he hecho este cambio. No he cambiado nada."
+
+# --- recordatorios y la previsión en el calendario, con botones; /recordatorios -----------
+remind_offer: "{name}, ¿quieres que te lo recuerde?\n{lines}\n\nSi no respondes, no hago nada."
+remind_offer_nobody: "¿Quieres que lo recuerde?\n{lines}\n\nSi no respondes, no hago nada."
+remind_here: "Recordatorio aquí"
+remind_calendar: "En el calendario"
+remind_nothing: "Nada"
+remind_timeout: "Sin respuesta: nada"
+remind_set: "Te lo recuerdo aquí el {when}."
+remind_set_log: "⏰ Recordatorio puesto para el {when}: {text}"
+remind_calendar_turn: "[pedido con el botón «En el calendario» de un recordatorio] Añade a mi calendario un evento para este recordatorio, una sola vez, el {when} ({iso}): «{text}»."
+reminder_when: "{date}, {time}"
+reminder_late: "(con retraso: era para el {when})"
+reminders_none: "No hay recordatorios pendientes en este chat."
+reminders_title: "⏰ Recordatorios pendientes:"
+reminders_cancel: "Cancelar {n}"
+reminders_cancelled: "Cancelado {n}"
+reminder_cancelled: "Cancelado."
+reminder_cancelled_log: "⏰ Recordatorio cancelado: {when}: {text}"
+ask_preapproved: "Aprobado con el botón «En el calendario»: {what}\n{result}"
+entry_day: "{title}: {day}"
+entry_days: "{title}: del {first} al {last}"
+plan_period: "Regla prevista"
+plan_follicular: "Fase folicular"
+plan_luteal: "Fase lútea"
+plan_offer: "{m}, ¿pongo en tu calendario la previsión de tu ciclo?\n{lines}\n\nSi no respondes, no hago nada."
+plan_moved: "La previsión ha cambiado desde entonces; te ofrezco la nueva."
+plan_calendar_turn: "[pedido con el botón «En el calendario» de la previsión] Pon en mi calendario estas entradas de la previsión:\n{entries}"

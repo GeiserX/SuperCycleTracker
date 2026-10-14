@@ -91,6 +91,7 @@ menu:
   anotar: "Note a day without the assistant"
   hora: "Change the time I ask"
   deshacer: "Undo the last thing I noted"
+  recordatorios: "The reminders to come, to cancel one"
   ayuda: "What I understand"
 help: |-
   What I understand:
@@ -99,6 +100,7 @@ help: |-
   /anotar yesterday heavy 6 cramps: note a day without the assistant
   /hora 21:30: change the time I ask
   /deshacer: undo the last thing I noted
+  /recordatorios: the reminders to come, to cancel one
   /ayuda: this list
   You can also reply to any of my messages.
 help_admin: |-
@@ -112,6 +114,7 @@ intro: |-
   She can reply to any of my messages in her own words or with a voice note, and I note it.
   She can ask me about her cycle or her health; I answer with her own history in mind and look things up in reliable sources.
   If she wants to change something (the time I ask, how I work), she only has to ask me.
+  When I can do something for her (a reminder, putting the cycle forecast in her calendar), I offer it with buttons; if she does not answer, I do nothing. /recordatorios shows the ones set and cancels them.
   What I note is kept in a private repository of this household. To understand what she writes and answer her questions, an AI assistant reads her messages and her history.
   /ayuda lists what I understand.
 
@@ -186,8 +189,8 @@ button_yes: "Yes"
 button_no: "No"
 button_approve: "Approve"
 button_reject: "Reject"
-options_hint: "Or tell me something else."
-yes_no_hint: "Tap Yes or No. If you want something else, reply to this message."
+options_hint: "Or tell me something else. If you do not answer, I do nothing."
+yes_no_hint: "Tap Yes or No. If you want something else, reply to this message. If you do not answer, I do nothing."
 tap_gone: "This is no longer waiting for an answer."
 tap_not_yours: "Only {name} can answer this."
 ask_confirm: "{name}, do you approve?\n{summary}"
@@ -195,3 +198,31 @@ ask_done: "Done."
 ask_failed: "It failed: {error}"
 ask_failed_unknown: "It did not go through."
 ask_edited: "You edited your message, so I did not make this change. Nothing has changed."
+
+# --- reminders and the calendar plan, offered with buttons; /recordatorios ----------------
+remind_offer: "{name}, shall I remind you?\n{lines}\n\nIf you do not answer, I do nothing."
+remind_offer_nobody: "Shall I set a reminder?\n{lines}\n\nIf you do not answer, I do nothing."
+remind_here: "Reminder here"
+remind_calendar: "In the calendar"
+remind_nothing: "Nothing"
+remind_timeout: "No answer: nothing"
+remind_set: "I will remind you here on {when}."
+remind_set_log: "⏰ Reminder set for {when}: {text}"
+remind_calendar_turn: "[asked with the «In the calendar» button of a reminder] Add an event to my calendar for this reminder, once, on {when} ({iso}): «{text}»."
+reminder_when: "{date}, {time}"
+reminder_late: "(late: it was for {when})"
+reminders_none: "No reminders to come in this chat."
+reminders_title: "⏰ Reminders to come:"
+reminders_cancel: "Cancel {n}"
+reminders_cancelled: "Cancelled {n}"
+reminder_cancelled: "Cancelled."
+reminder_cancelled_log: "⏰ Reminder cancelled: {when}: {text}"
+ask_preapproved: "Approved with the «In the calendar» button: {what}\n{result}"
+entry_day: "{title}: {day}"
+entry_days: "{title}: {first} to {last}"
+plan_period: "Expected period"
+plan_follicular: "Follicular phase"
+plan_luteal: "Luteal phase"
+plan_offer: "{m}, shall I put your cycle forecast in your calendar?\n{lines}\n\nIf you do not answer, I do nothing."
+plan_moved: "The forecast has changed since; I will offer you the new one."
+plan_calendar_turn: "[asked with the «In the calendar» button of the forecast] Put these forecast entries in my calendar:\n{entries}"

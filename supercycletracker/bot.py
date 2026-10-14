@@ -23,6 +23,7 @@ value.
 from __future__ import annotations
 
 import html
+import json
 import logging
 import re
 import secrets
@@ -84,7 +85,7 @@ POLL_S = 20  # getUpdates long poll
 WAIT_409_S = 30  # another poller holds the token: wait and keep the offset
 TICK_S = 60  # a long wait ticks at least this often: the healthcheck allows 180 s
 BACKOFF_MIN_S, BACKOFF_MAX_S = 5, 300  # 5xx and network failures
-MENU = ("hoy", "resumen", "anotar", "hora", "deshacer", "ayuda")  # the commands in the menu
+MENU = ("hoy", "resumen", "anotar", "hora", "deshacer", "recordatorios", "ayuda")  # the menu
 DEBOUNCE_S = 2.5  # a chat's turn starts this long after its newest message: a burst goes together
 VOICE_WAIT_S = 30  # and waits this long at most, from a note's arrival, for a note being heard
 SAID_MAX = 30  # answered messages kept per chat, so an edit of one can be compared with it
@@ -94,6 +95,19 @@ OPTIONS_KEEP = 20  # offers kept per chat
 ASK_DEFAULT_S = 300  # an ask that names no end of its own waits this long
 NO_ONE = "no one could be asked"  # the note of an ask declined because nobody could answer it
 SETTINGS_KEYS = ("ask_at", "period_max_day")  # what a `settings` block or /hora may change
+HISTORY_SCOPES = ("asked", "all")  # telegram.history_scope: which group messages are logged
+HISTORY_DAYS = 14  # telegram.history_days by default: the recap a fresh conversation starts from
+HISTORY_DAYS_MAX = 60
+CONTEXT_MAX = 50  # unaddressed group lines a turn takes as context, the newest
+LOG_KEEP_DAYS = 7  # the chat log keeps at least this much, for the context lines of a turn
+NOT_TO_YOU = "[not to you] "  # the mark of a group line that did not call the bot
+OFFER_GONE = "remind_timeout"  # the label an offer's buttons give way to when nobody answered
+REMIND_TTL_S = 1800  # an offered reminder can be tapped this long; then nothing is done
+REMIND_DAYS = 60  # the furthest ahead a reminder may be
+LATE_S = 600  # a reminder posted this much after its time says so
+PLAN_TTL_S = 12 * 3600  # the calendar plan's offer can be tapped this long
+PLAN_HOURS = (10, 22)  # the plan is offered between these local hours only
+GRANT_SLACK_S = 60  # a tap approves an addition at its time, give or take this
 
 _COMMAND = re.compile(r"^/([A-Za-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s+(.*))?$", re.DOTALL)
 _CALLBACK_DATE = re.compile(r"^\d{8}$")
@@ -124,7 +138,10 @@ class Profile:
     user_id: int | None = None
     username: str | None = None
     admins: Mapping[int, str] = field(default_factory=dict)
+    history_scope: str = "asked"
+    history_days: int | None = HISTORY_DAYS  # None: not a whole number (profile_errors)
     assistant: Mapping | None = None
+    calendar: Mapping = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: object) -> Profile:
@@ -142,6 +159,8 @@ class Profile:
         username = tg.get("username")
         block = raw.get("assistant")
         max_day = raw.get("period_max_day")
+        days = tg.get("history_days")
+        calendar = raw.get("calendar")
         return cls(
             name=str(raw.get("name") or ""),
             timezone=str(raw.get("timezone") or "UTC"),
@@ -153,7 +172,10 @@ class Profile:
             user_id=_int(tg.get("user_id")),
             username=str(username).lstrip("@") if username else None,
             admins={int(k): str(v) for k, v in admins.items()},
+            history_scope=str(tg.get("history_scope") or "asked"),
+            history_days=HISTORY_DAYS if days is None else _int(days),
             assistant=dict(block) if isinstance(block, Mapping) else None,
+            calendar=dict(calendar) if isinstance(calendar, Mapping) else {},
         )
 
 
@@ -239,6 +261,15 @@ def profile_errors(p: Profile, data: str | Path) -> list[str]:
         errors.append("missing_chat_id")
     if p.user_id is None:
         errors.append("missing_user_id")
+    if p.history_scope not in HISTORY_SCOPES:
+        errors.append("bad_history_scope")
+    if p.history_days is None or not 0 <= p.history_days <= HISTORY_DAYS_MAX:
+        errors.append("bad_history_days")
+    titles = p.calendar.get("titles") or {}
+    if not isinstance(titles, Mapping) or any(
+        k not in cycle.PLAN_KINDS or not isinstance(v, str | None) for k, v in titles.items()
+    ):
+        errors.append("bad_calendar_titles")
     plugin = (p.assistant or {}).get("plugin")
     if plugin:
         root = Path(data).resolve()
@@ -381,6 +412,8 @@ class Turn:
     asks: list[str] = field(default_factory=list)
     edited: dict = field(default_factory=dict)  # message id -> its newest wording
     closed: bool = False
+    # taps on a calendar button: each approves the additions it named, once
+    grants: list = field(default_factory=list)
 
     def has(self, line_id: object) -> bool:
         return line_id in self.ids or line_id in self.pulled
@@ -395,6 +428,27 @@ def _mid(line: Mapping) -> int | None:
 
 def _users(lines: Sequence[Mapping]) -> list[int]:
     return list(dict.fromkeys(x["uid"] for x in lines if x.get("uid")))
+
+
+def _iso(ts: int) -> str:
+    return datetime.fromtimestamp(int(ts), UTC).isoformat(timespec="seconds")
+
+
+def _grant(raw: Mapping) -> dict:
+    """A turn's own copy of a calendar button's grant, so using it up marks only that copy."""
+    out = dict(raw)
+    if isinstance(out.get("events"), list):
+        out["events"] = [dict(e) for e in out["events"] if isinstance(e, dict)]
+    return out
+
+
+def _same_event(event: object, entry: Mapping) -> bool:
+    """Whether an ask's `event` is exactly a plan entry: the same title, start and end."""
+    if not isinstance(event, Mapping):
+        return False
+    return all(
+        str(event.get(k) or "") == str(entry.get(k) or "") for k in ("title", "start", "end")
+    )
 
 
 def _words(text: str) -> str:
@@ -465,6 +519,7 @@ class Bot:
             (("resumen", "summary"), self.cmd_resumen, both),
             (("anotar", "log"), self.cmd_anotar, both),
             (("deshacer", "undo"), self.cmd_deshacer, both),
+            (("recordatorios", "reminders"), self.cmd_recordatorios, both),
             (("hora", "time"), self.cmd_hora, both),
             (("estado", "status"), self.cmd_estado, admins),
             (("nuevo", "new"), self.cmd_nuevo, admins),
@@ -822,11 +877,17 @@ class Bot:
             log.info("callback refused: not_allowed")
             return
         data = cq.get("data")
-        if isinstance(data, str) and data.startswith(("a:", "o:")):
+        if isinstance(data, str) and data.startswith(("a:", "o:", "r:", "c:", "k:")):
             if chat is None:
                 self.answer(cq["id"])
             elif data.startswith("a:"):
                 self.tapped_ask(cq, chat, data, user)
+            elif data.startswith("r:"):
+                self.tapped_remind(cq, chat, data, user, role)
+            elif data.startswith("c:"):
+                self.tapped_plan(cq, chat, data, user, role)
+            elif data.startswith("k:"):
+                self.tapped_cancel(cq, chat, data)
             else:
                 self.tapped_option(cq, chat, data, user, role)
             return
@@ -1130,10 +1191,12 @@ class Bot:
         chat = msg.get("chat") or {}
         user = (msg.get("from") or {}).get("id")
         role = self.role(user)
-        if role is None:
-            return  # anyone else gets no answer
         private = chat.get("type") == "private"
         if not private and chat.get("id") != self.chat_id:
+            return
+        if role is None:  # anyone else gets no answer; in the group, the log may keep it
+            if not private:
+                self.log_seen(chat["id"], msg, text)
             return
         command = _COMMAND.match(text.strip())
         if command:
@@ -1148,6 +1211,33 @@ class Bot:
         content = self.addressed(msg, text, private, role)
         if content is not None:
             self.queue_text(chat["id"], msg, content, role, self._strip_mention(msg, text)[0])
+        elif not private:
+            self.log_seen(chat["id"], msg, text)
+
+    def sender(self, msg: Mapping) -> str:
+        """How the log names a message's sender: her or an admin by the profile, anyone else by
+        their Telegram first name."""
+        frm = msg.get("from") or {}
+        role = self.role(frm.get("id"))
+        if role is not None:
+            return self.who(role, frm.get("id"))
+        return " ".join(str(frm.get("first_name") or "?").split())[:64]
+
+    def log_seen(self, chat: int, msg: Mapping, text: str) -> None:
+        """A group message that does not call the bot. With `history_scope: all` the chat log
+        keeps it, and it goes to the next turn as context marked «[not to you]»."""
+        if self.profile.history_scope != "all" or not self.has_assistant:
+            return
+        body = text.strip()
+        if body.startswith("/"):
+            return
+        name = self.sender(msg)
+        now = int(self.now().timestamp())
+        mid = msg.get("message_id")
+        self.kv.add_chat(
+            chat, "user", name, f"{name}: {body}", now, body=body, mid=mid, asked=False
+        )
+        log.info("group line logged")
 
     def addressed(self, msg: Mapping, text: str, private: bool, role: str) -> str | None:
         """The line for the assistant when the message is meant for the bot, else None.
@@ -1225,22 +1315,40 @@ class Bot:
         log.info("voice queued")
 
     def queue_text(
-        self, chat: int, msg: Mapping, content: str, role: str, body: str | None = None
+        self,
+        chat: int,
+        msg: Mapping,
+        content: str,
+        role: str,
+        body: str | None = None,
+        row: int | None = None,
     ) -> None:
-        """Append a line to `pending:<chat>` and queue the chat for the worker. `body` is the
-        message's own words, kept so an edit can be compared with them. Without an assistant:
-        «no_ai» with today's keyboard."""
+        """Append a line to `pending:<chat>`, log it in the chat log (or reuse its `row`) and
+        queue the chat for the worker. `body` is the message's own words, kept so an edit can be
+        compared with them. Without an assistant: «no_ai» with today's keyboard."""
         if not self.has_assistant:
             self.post(chat, self.t("no_ai"), self.today_keyboard())
             log.info("text without assistant")
             return
         now = int(self.now().timestamp())
+        user = (msg.get("from") or {}).get("id")
+        if row is None:
+            row = self.kv.add_chat(
+                chat,
+                "user",
+                self.who(role, user),
+                content,
+                now,
+                body=body.strip() if body is not None else None,
+                mid=msg.get("message_id"),
+            )
         line = {
             "id": msg.get("message_id"),
             "ts": now,
             "content": content,
             "admin": role == ADMIN,
-            "uid": (msg.get("from") or {}).get("id"),
+            "uid": user,
+            "row": row,
         }
         if body is not None:
             line["body"] = body.strip()
@@ -1404,6 +1512,8 @@ class Bot:
         self.kv.delete(f"pending:{chat}")
         self.kv.delete(f"said:{chat}")
         self.kv.delete(f"options:{chat}")
+        self.kv.delete(f"ctx:{chat}")
+        self.kv.chat_clear(chat)
         if conversation and self.has_assistant:
             block = self.profile.assistant or {}
             try:
@@ -1493,7 +1603,30 @@ class Bot:
             self.expire_asks()
         except Exception as e:  # noqa: BLE001
             log.warning("ask expiry failed: %s", safe(e))
+        for step, what in (
+            (self.tick_reminders, "reminder tick"),
+            (self.expire_offers, "offer expiry"),
+            (self.expire_options, "options expiry"),
+            (lambda: self.offer_plan(now), "plan offer"),
+            (lambda: self.prune_log(now), "log prune"),
+        ):
+            try:
+                step()
+            except Exception as e:  # noqa: BLE001 - the loop must go on
+                log.warning("%s failed: %s", what, safe(e))
         self.heartbeat()
+
+    def prune_log(self, now: datetime) -> None:
+        """Once an hour, the chat log forgets what is older than it needs: `history_days`, and
+        at least the 7 days a turn's context lines reach back."""
+        hour = int(now.timestamp()) // 3600
+        if getattr(self, "_pruned", None) == hour:
+            return
+        self._pruned = hour
+        days = max(self.profile.history_days or 0, LOG_KEEP_DAYS)
+        gone = self.kv.chat_prune(int(now.timestamp()) - days * 86400)
+        if gone:
+            log.info("chat log pruned rows=%d", gone)
 
     def heartbeat(self) -> None:
         if self.alive is not None:
@@ -1607,6 +1740,7 @@ class Bot:
             if not lines:
                 return
             state = Turn(chat, [x["id"] for x in lines], _users(lines), _mid(lines[-1]))
+            state.grants = [_grant(x["grant"]) for x in lines if isinstance(x.get("grant"), dict)]
             self._running[chat] = state
         try:
             self._converse(chat, key, lines, state)
@@ -1629,6 +1763,9 @@ class Bot:
         with self._conv_lock:
             resets = self._resets[chat]
             conversation = self.kv.get(f"conv:{chat}")
+        now_ts = int(now.timestamp())
+        last_row = self.kv.chat_last(chat)
+        seen = self.context_rows(chat, now_ts, last_row)
         try:
             with DATA_LOCK:
                 try:
@@ -1637,6 +1774,7 @@ class Bot:
                     log_text = ""
             log_ = records.loads(log_text)
             admins = list(p.admins.values())
+            plan = self.plan(log_, today)[0]
             context = assistant.context(
                 log_,
                 now,
@@ -1649,14 +1787,20 @@ class Bot:
                 period_max_day=self.max_day,
                 asked=self.kv.get("last_ask") == today.isoformat(),
                 skipped=self.skipped(),
+                plan=plan,
             )
-            rules = assistant.rules(p.name, p.language, admins, block_cfg.get("instructions") or "")
+            rules = assistant.rules(
+                p.name, p.language, admins, block_cfg.get("instructions") or "", self.read_all
+            )
             turn = assistant.turn(
                 conversation,
                 rules,
                 context,
                 log_text,
-                [x["content"] for x in lines],
+                self.new_lines(lines, seen),
+                self.history(
+                    chat, now_ts, last_row, {x.get("row") for x in lines} | {r["id"] for r in seen}
+                ),
             )
             turn["incoming"] = self._incoming(state, key)
             if assistant.asks(self.data, block_cfg.get("plugin")):
@@ -1695,12 +1839,16 @@ class Bot:
         text, block = assistant.extract(reply.text)
         text, settings = assistant.extract(text, "settings")
         text, offered = assistant.extract_options(text)
+        text, listed = assistant.extract_reminders(text)
         offered = reply.options or offered
+        listed = reply.reminders or listed
         users = _users(covered)
         if text and not self.say(chat, text, reply_to, offered, users):
             # she never saw the answer: a failed turn, so the buttons and the lines stay
             self.post(chat, self.t("ai_down"), self.today_keyboard())
             return
+        if text:
+            self.kv.add_chat(chat, "assistant", None, text, int(self.now().timestamp()))
         if block is not None:
             source = "admin" if all(x.get("admin") for x in covered) else "telegram"
             self.apply_block(chat, block, source, today)
@@ -1712,6 +1860,10 @@ class Bot:
         # nothing the second time
         taken = {x["id"] for x in covered}
         self.kv.update_json(key, lambda cur: [x for x in cur or [] if x["id"] not in taken] or None)
+        if seen:  # the context lines went with a turn that was kept: not again
+            self.kv.set(f"ctx:{chat}", str(max(r["id"] for r in seen)))
+        if listed:
+            self.offer_reminders(chat, listed, covered, reply_to)
         missed = len(state.pulled) - len(handed)
         if handed or missed:
             log.info("handed over: covered=%d next_turn=%d", len(handed), missed)
@@ -1735,6 +1887,9 @@ class Bot:
                     if "content" in x and not state.has(x.get("id"))
                 ]
                 state.pulled.extend(x["id"] for x in got)
+                state.grants += [
+                    _grant(x["grant"]) for x in got if isinstance(x.get("grant"), dict)
+                ]
                 for uid in _users(got):
                     if uid not in state.users:
                         state.users.append(uid)
@@ -1749,6 +1904,38 @@ class Bot:
             ]
 
         return incoming
+
+    def context_rows(self, chat: int, now: int, upto: int) -> list[dict]:
+        """The group lines that did not call the bot and no kept turn has taken yet (the
+        newest CONTEXT_MAX, none older than 7 days): context for this turn."""
+        after = int(self.kv.get(f"ctx:{chat}") or 0)
+        rows = self.kv.chat_rows(chat, now - PENDING_MAX_AGE_S, upto)
+        return [r for r in rows if not r["asked"] and r["role"] == "user" and r["id"] > after][
+            -CONTEXT_MAX:
+        ]
+
+    @staticmethod
+    def new_lines(lines: Sequence[Mapping], seen: Sequence[Mapping]) -> list[dict]:
+        """The turn's `new`: the lines for the bot and the group lines it only saw, marked
+        «[not to you]», in the order they came."""
+        items = [(int(r["ts"]), 0, i, NOT_TO_YOU + r["text"]) for i, r in enumerate(seen)]
+        items += [(int(x.get("ts") or 0), 1, i, x["content"]) for i, x in enumerate(lines)]
+        return [{"content": c, "ts": _iso(ts)} for ts, _, _, c in sorted(items)]
+
+    def history(self, chat: int, now: int, upto: int, skip: set) -> list[dict]:
+        """The chat log of the last `history_days` before this turn, without the lines the turn
+        sends as new: the recap a provider starts a conversation over from."""
+        days = self.profile.history_days or 0
+        if days <= 0:
+            return []
+        out = []
+        for r in self.kv.chat_rows(chat, now - days * 86400, upto):
+            if r["id"] in skip:
+                continue
+            text = r["text"] if r["role"] == "assistant" or r["asked"] else NOT_TO_YOU + r["text"]
+            role = "assistant" if r["role"] == "assistant" else "user"
+            out.append({"role": role, "content": text, "ts": _iso(r["ts"])})
+        return out
 
     def remember(self, chat: int, covered: Sequence[Mapping], answer: str) -> None:
         """Keep the words of the messages an answer covered, with that answer, so an edit of one
@@ -1786,8 +1973,8 @@ class Bot:
             self.post(chat, self.t("later_failed"))
             return
         log.info("later done %ds", round(time.monotonic() - started))
-        if out.strip():
-            self.say(chat, out.strip(), None)
+        if out.strip() and self.say(chat, out.strip(), None):
+            self.kv.add_chat(chat, "assistant", None, out.strip(), int(self.now().timestamp()))
 
     # --- asks: an action the assistant wants to take, approved by a person ----------------
 
@@ -1828,10 +2015,15 @@ class Bot:
         with self._q:
             if any(a["request"].get("id") == request["id"] for a in self.asks.values()):
                 return True
-        by = self.approvers(state, request.get("confirm_by"))
         expires = request.get("expires_at")
         ok_end = isinstance(expires, int | float) and not isinstance(expires, bool)
         expires = float(expires) if ok_end else time.time() + ASK_DEFAULT_S
+        if not state.closed and summary and expires > time.time():
+            grant = self.granted(state, request)
+            if grant is not None:
+                self.preapproved(state, request, grant, summary)
+                return True
+        by = self.approvers(state, request.get("confirm_by"))
         if state.closed or not by or not summary or expires <= time.time():
             self.decline(request, NO_ONE)
             log.info("ask declined: nobody to ask")
@@ -1867,6 +2059,63 @@ class Bot:
             self.close_asks(state)
         log.info("ask posted")
         return True
+
+    def granted(self, state: Turn, request: Mapping) -> dict | None:
+        """The grant a calendar button gave this turn for this ask, used up, or None.
+
+        A reminder's «En el calendario» names one time: the turn's first ask uses it up, and it
+        approves that ask only when the ask adds an event at that time (`action` "add", `when`
+        within GRANT_SLACK_S). The plan's button names its entries: an ask that adds one of
+        them exactly (`event` with the same title, start and end) is approved, each once."""
+        if request.get("action") != "add":
+            return None
+        when, event = request.get("when"), request.get("event")
+        with self._q:
+            for g in state.grants:
+                if "at" in g:
+                    if g.get("used"):
+                        continue
+                    g["used"] = True
+                    ok = isinstance(when, int | float) and not isinstance(when, bool)
+                    return g if ok and abs(float(when) - float(g["at"])) < GRANT_SLACK_S else None
+                for e in g.get("events") or []:
+                    if not e.get("used") and _same_event(event, e):
+                        e["used"] = True
+                        return g
+        return None
+
+    def preapproved(self, state: Turn, request: Mapping, grant: Mapping, summary: str) -> None:
+        """An ask a calendar button already approved: answered yes for the person who tapped,
+        and the chat sees what was approved and how it went."""
+        block = self.profile.assistant or {}
+        try:
+            out = assistant.answer(
+                self.data,
+                block.get("plugin"),
+                dict(request),
+                {"approved": True, "by": str(grant.get("by")), "note": "approved by the button"},
+                assistant.settings(block),
+            )
+        except Exception as e:  # noqa: BLE001 - the plugin may raise anything
+            log.warning("a preapproved ask failed: %s", safe(e))
+            out = {"ok": False, "error": None}
+        if out.get("ok"):
+            said = self.t("ask_done")
+        elif out.get("error"):
+            said = self.t("ask_failed", error=html.escape(str(out["error"])[:300], quote=False))
+        else:
+            said = self.t("ask_failed_unknown")
+        what = html.escape(summary, quote=False)
+        event = request.get("event")
+        if isinstance(event, Mapping) and event.get("title"):
+            what = self.entry_text(str(event["title"]), event.get("start"), event.get("end"))
+        where = (
+            {"message_id": state.mid, "allow_sending_without_reply": True} if state.mid else None
+        )
+        self.post(
+            state.chat, self.t("ask_preapproved", what=what, result=said), reply_parameters=where
+        )
+        log.info("ask approved by a button")
 
     def decline(self, request: Mapping, note: str, by: str = "bot") -> None:
         block = self.profile.assistant or {}
@@ -2019,18 +2268,426 @@ class Bot:
         )
         self.answer(cq["id"])
         self.unbutton(chat, mid, f"✓ {label}")
+        content = f"{self.who(role, user)}: {label}"
         line = {
             "id": f"o{key}",
             "mid": mid,
             "ts": now,
-            "content": f"{self.who(role, user)}: {label}",
+            "content": content,
             "admin": role == ADMIN,
             "uid": user,
             "body": label,
             "tap": True,
+            "row": self.kv.add_chat(chat, "user", self.who(role, user), content, now),
         }
         self.queue_line(chat, line)
         log.info("option tapped")
+
+    def expire_options(self) -> None:
+        """Choices nobody tapped in OPTIONS_TTL_S: nothing is done, and their buttons say so."""
+        now = int(self.now().timestamp())
+        for key in self.kv.keys("options:"):
+            gone: list[dict] = []
+
+            def keep(cur, gone=gone):
+                fresh = []
+                for o in cur or []:
+                    (gone if now - int(o.get("ts", 0)) > OPTIONS_TTL_S else fresh).append(o)
+                return fresh or None
+
+            self.kv.update_json(key, keep, [])
+            for o in gone:
+                self.unbutton(int(key.removeprefix("options:")), o.get("msg"), self.t(OFFER_GONE))
+
+    # --- reminders and the calendar plan, offered with buttons ---------------------------
+
+    def zone(self) -> ZoneInfo:
+        return ZoneInfo(self.profile.timezone)
+
+    def when_text(self, at: float) -> str:
+        """A reminder's time as she reads it: «domingo 18 de octubre, 18:00»."""
+        local = datetime.fromtimestamp(at, self.zone())
+        return self.t("reminder_when", date=self.t.date(local.date()), time=f"{local:%H:%M}")
+
+    def entry_text(self, title: str, start: object, end: object) -> str:
+        """A plan entry as she reads it: «Fase lútea: del 11 al 23 de octubre» (the end is
+        exclusive, so the last day shown is the day before it)."""
+        try:
+            first = date.fromisoformat(str(start))
+            last = date.fromisoformat(str(end)) - timedelta(days=1)
+        except ValueError:
+            return html.escape(title)
+        if last <= first:
+            return self.t("entry_day", title=html.escape(title), day=self.t.date(first, "short"))
+        return self.t(
+            "entry_days",
+            title=html.escape(title),
+            first=self.t.date(first, "short"),
+            last=self.t.date(last, "short"),
+        )
+
+    def mention_of(self, uid: object) -> str:
+        if uid == self.profile.user_id:
+            return self.mention()
+        name = html.escape(self.profile.admins.get(uid, "") or "")
+        return f'<a href="tg://user?id={uid}">{name}</a>' if name else ""
+
+    def offers(self, chat: int) -> list[dict]:
+        return [o for o in self.kv.get_json(f"remind:{chat}", []) or [] if isinstance(o, dict)]
+
+    def keep_offer(self, chat: int, offer: dict) -> None:
+        """Store an offer, or drop it once nothing in it waits for a tap."""
+        key = offer["key"]
+        waiting = any(not i.get("done") for i in offer.get("items") or [])
+
+        def put(cur):
+            rest = [o for o in cur or [] if o.get("key") != key]
+            return [*rest, offer] if waiting else rest or None
+
+        self.kv.update_json(f"remind:{chat}", put, [])
+
+    def remind_rows(self, offer: Mapping) -> list:
+        """Buttons for each offered reminder (here, in the calendar, nothing), or one inert
+        button saying what became of it."""
+        t, key, items = self.t, offer["key"], offer["items"]
+        calendar = bool(self.profile.calendar.get("reminders"))
+        rows = []
+        for n, r in enumerate(items):
+            pre = f"{n + 1} · " if len(items) > 1 else ""
+            if r.get("done"):
+                rows.append([(f"✓ {pre}{t('remind_' + r['done'])}", "x")])
+                continue
+            first = [(pre + t("remind_here"), f"r:{key}:{n}h")]
+            if calendar:
+                first.append((pre + t("remind_calendar"), f"r:{key}:{n}c"))
+            rows += [first, [(pre + t("remind_nothing"), f"r:{key}:{n}x")]]
+        return rows
+
+    def plan_rows(self, offer: Mapping) -> list:
+        done = offer["items"][0].get("done")
+        if done:
+            return [[("✓ " + self.t("remind_" + done), "x")]]
+        key = offer["key"]
+        return [
+            [(self.t("remind_calendar"), f"c:{key}:y")],
+            [(self.t("remind_nothing"), f"c:{key}:n")],
+        ]
+
+    def rows_of(self, offer: Mapping) -> list:
+        return self.plan_rows(offer) if offer.get("kind") == "plan" else self.remind_rows(offer)
+
+    def rekey(self, chat: int, message_id: object, rows: list) -> None:
+        if not message_id:
+            return
+        try:
+            self.tg.call(
+                "editMessageReplyMarkup",
+                chat_id=chat,
+                message_id=message_id,
+                reply_markup=_keyboard(rows),
+            )
+        except TelegramError as e:
+            log.info("buttons not changed: %s", safe(e))
+
+    def offer_reminders(
+        self, chat: int, listed: Sequence[Mapping], covered: Sequence[Mapping], reply_to
+    ) -> None:
+        """One message with the reminders an answer listed, buttons for each. Nothing happens
+        until a tap; untapped, the offer expires (REMIND_TTL_S) and nothing is done. A reminder
+        is for the person the answer was for (her, when it was for several)."""
+        now = self.now().timestamp()
+        items = []
+        for r in listed:
+            try:
+                at = datetime.strptime(r["when"], "%Y-%m-%d %H:%M").replace(tzinfo=self.zone())
+            except (KeyError, TypeError, ValueError):
+                continue
+            if now + 60 <= at.timestamp() <= now + REMIND_DAYS * 86400:
+                items.append({"at": at.timestamp(), "text": r["text"], "done": None})
+        if not items:
+            return
+        users = _users(covered)
+        uid = users[0] if len(users) == 1 else self.profile.user_id
+        many = len(items) > 1
+        lines = "\n".join(
+            (f"{n + 1}. " if many else "") + f"{self.when_text(r['at'])}: {html.escape(r['text'])}"
+            for n, r in enumerate(items)
+        )
+        offer = {
+            "key": secrets.token_hex(4),
+            "kind": "remind",
+            "uid": uid,
+            "for": list(dict.fromkeys([*users, uid])),
+            "items": items,
+            "ts": now,
+            "ttl": REMIND_TTL_S,
+        }
+        where = {"message_id": reply_to, "allow_sending_without_reply": True} if reply_to else None
+        name = self.mention_of(uid)
+        text = self.t("remind_offer" if name else "remind_offer_nobody", name=name, lines=lines)
+        sent = self.post(chat, text, _keyboard(self.remind_rows(offer)), reply_parameters=where)
+        if sent is None:
+            return
+        offer["msg"] = sent.get("message_id")
+        self.keep_offer(chat, offer)
+        log.info("reminders offered n=%d", len(items))
+
+    def tapped_remind(self, cq: Mapping, chat: int, data: str, user: object, role: str) -> None:
+        """Where an offered reminder goes: here (stored, posted at its time), in the calendar (a
+        turn in which the assistant adds it, approved by this tap) or nothing."""
+        _, key, choice = [*data.split(":"), "", ""][:3]
+        mid = (cq.get("message") or {}).get("message_id")
+        offer = next((o for o in self.offers(chat) if o.get("key") == key), None)
+        if offer is None or self.now().timestamp() - offer.get("ts", 0) > offer.get(
+            "ttl", REMIND_TTL_S
+        ):
+            self.answer(cq["id"], self.t("tap_gone"))
+            if offer is None:
+                self.unbutton(chat, mid)
+            return
+        if user not in offer.get("for", []):
+            self.answer(cq["id"], self.t("tap_not_yours", name=self.plain_names(offer["for"])))
+            return
+        n, c = choice[:-1], choice[-1:]
+        items = offer["items"]
+        calendar = bool(self.profile.calendar.get("reminders"))
+        if (
+            not n.isdigit()
+            or int(n) >= len(items)
+            or c not in ("h", "c", "x")
+            or (c == "c" and not calendar)
+        ):
+            self.answer(cq["id"])
+            return
+        item = items[int(n)]
+        if item.get("done"):
+            self.answer(cq["id"], self.t("tap_gone"))
+            return
+        item["done"] = {"h": "here", "c": "calendar", "x": "nothing"}[c]
+        self.keep_offer(chat, offer)  # before anything else: a second tap finds it settled
+        when = self.when_text(item["at"])
+        self.answer(cq["id"], self.t("remind_set", when=when) if c == "h" else None)
+        self.rekey(chat, offer.get("msg"), self.remind_rows(offer))
+        now = int(self.now().timestamp())
+        if c == "h":
+            self.kv.add_reminder(chat, offer.get("uid"), item["at"], item["text"], user, now)
+            said = self.t("remind_set_log", when=when, text=item["text"])
+            self.kv.add_chat(chat, "assistant", None, said, now)
+            log.info("reminder set")
+        elif c == "c":
+            local = datetime.fromtimestamp(item["at"], self.zone())
+            asked = self.t(
+                "remind_calendar_turn", when=when, iso=local.isoformat(), text=item["text"]
+            )
+            self.queue_tap(chat, mid, user, role, asked, {"by": user, "at": item["at"]})
+            log.info("reminder to the calendar")
+
+    def queue_tap(
+        self, chat: int, mid: object, user: object, role: str, text: str, grant: dict
+    ) -> None:
+        """A calendar button's tap as that person's message, carrying what it approves."""
+        now = int(self.now().timestamp())
+        content = f"{self.who(role, user)}: {text}"
+        self.queue_line(
+            chat,
+            {
+                "id": f"g{secrets.token_hex(4)}",
+                "mid": mid,
+                "ts": now,
+                "content": content,
+                "admin": role == ADMIN,
+                "uid": user,
+                "tap": True,
+                "grant": grant,
+                "row": self.kv.add_chat(chat, "user", self.who(role, user), content, now),
+            },
+        )
+
+    def expire_offers(self) -> None:
+        """Offers nobody settled in time: nothing is done, and their buttons say so."""
+        now = self.now().timestamp()
+        for key in self.kv.keys("remind:"):
+            chat = int(key.removeprefix("remind:"))
+            gone: list[dict] = []
+
+            def keep(cur, gone=gone):
+                fresh = []
+                for o in cur or []:
+                    late = now - o.get("ts", 0) > o.get("ttl", REMIND_TTL_S)
+                    (gone if late else fresh).append(o)
+                return fresh or None
+
+            self.kv.update_json(key, keep, [])
+            for o in gone:
+                for r in o.get("items") or []:
+                    r["done"] = r.get("done") or "timeout"
+                self.rekey(chat, o.get("msg"), self.rows_of(o))
+
+    def tick_reminders(self) -> None:
+        """Post every reminder whose time has come, naming the person it is for, then mark it
+        sent. One Telegram refuses for good (the chat is gone) is marked failed; one it could
+        not take now is tried again on the next tick."""
+        now = self.now().timestamp()
+        for r in self.kv.due_reminders(now):
+            name = self.mention_of(r["uid"])
+            text = (
+                f"⏰ {name}: {html.escape(r['text'])}" if name else f"⏰ {html.escape(r['text'])}"
+            )
+            if now - r["at"] > LATE_S:
+                text += "\n" + self.t("reminder_late", when=self.when_text(r["at"]))
+            try:
+                self.send(r["chat"], text)
+            except TelegramError as e:
+                log.warning("reminder not posted: %s", safe(e))
+                if e.code in (400, 403):
+                    self.kv.settle_reminder(r["id"], "failed")
+                continue
+            self.kv.settle_reminder(r["id"], "sent")
+            self.kv.add_chat(r["chat"], "assistant", None, text, int(self.now().timestamp()))
+            log.info("reminder posted")
+
+    def cmd_recordatorios(self, msg: Mapping, rest: str, role: str) -> None:
+        """/recordatorios: the chat's reminders still to come, each with a button to cancel it."""
+        chat = msg["chat"]["id"]
+        rows = self.kv.reminders(chat)[:20]
+        if not rows:
+            self.send(chat, self.t("reminders_none"))
+            return
+        lines, buttons = [self.t("reminders_title")], []
+        for n, r in enumerate(rows, 1):
+            # plain names: listing a reminder must not notify the person it is for
+            who = self.who(self.role(r["uid"]) or "", r["uid"])
+            name = f" · {html.escape(who)}" if who else ""
+            lines.append(f"{n}. {self.when_text(r['at'])}{name}: {html.escape(r['text'])}")
+            buttons.append([(self.t("reminders_cancel", n=n), f"k:{r['id']}:{n}")])
+        self.send(chat, "\n".join(lines), _keyboard(buttons))
+
+    def tapped_cancel(self, cq: Mapping, chat: int, data: str) -> None:
+        """Cancel a reminder from the /recordatorios list; its button says so."""
+        _, rid, n = [*data.split(":"), "", ""][:3]
+        message = cq.get("message") or {}
+        found = [r for r in self.kv.reminders(chat) if str(r["id"]) == rid]
+        if not found or not self.kv.settle_reminder(found[0]["id"], "cancelled"):
+            self.answer(cq["id"], self.t("tap_gone"))
+            return
+        r = found[0]
+        self.answer(cq["id"], self.t("reminder_cancelled"))
+        said = self.t("reminder_cancelled_log", when=self.when_text(r["at"]), text=r["text"])
+        self.kv.add_chat(chat, "assistant", None, said, int(self.now().timestamp()))
+        rows = [
+            [
+                (f"✓ {self.t('reminders_cancelled', n=n)}", "x")
+                if b.get("callback_data") == data
+                else (b.get("text", ""), b.get("callback_data", "x"))
+                for b in row
+            ]
+            for row in (message.get("reply_markup") or {}).get("inline_keyboard") or []
+        ]
+        self.rekey(chat, message.get("message_id"), rows)
+        log.info("reminder cancelled")
+
+    def plan(self, log_: Log, today: date) -> tuple[list[tuple[str, date, date]], str | None]:
+        """The calendar plan with its titles, and a key that changes only when the prediction
+        or the titles do; nothing without `calendar.events` in the profile."""
+        cal = self.profile.calendar
+        if not cal.get("events"):
+            return [], None
+        titles = {k: str(self.t(f"plan_{k}")) for k in cycle.PLAN_KINDS}
+        for k, v in (cal.get("titles") or {}).items():
+            titles[k] = " ".join(str(v or "").split())
+        titles = {k: v for k, v in titles.items() if v}
+        p = cycle.predict(log_, today)
+        entries = cycle.calendar_plan(log_, today, tuple(titles), self.skipped(), self.max_day)
+        if p is None or not entries:
+            return [], None
+        key = f"{p.last_start}:{p.expected}:{p.period_days}:" + ",".join(
+            f"{k}={titles[k]}" for k in cycle.PLAN_KINDS if k in titles
+        )
+        return [(titles[e.kind], e.start, e.end) for e in entries], key
+
+    def offer_plan(self, now: datetime) -> bool:
+        """When the calendar plan changed since it was last offered, offer it in the group, in
+        waking hours, with «En el calendario» and «Nada». Offered once per change: nobody
+        answering does nothing, and it is not offered again until the prediction moves."""
+        chat = self.chat_id
+        if chat is None or not self.has_assistant or not self.profile.calendar.get("events"):
+            return False
+        local = now.astimezone(self.zone())
+        if not PLAN_HOURS[0] <= local.hour < PLAN_HOURS[1]:
+            return False
+        today = cycle.bot_day(now, self.profile.timezone)
+        entries, key = self.plan(self.repo.load(), today)
+        if key is None or self.kv.get("calplan") == key:
+            return False
+        lines = "\n".join(
+            "• " + self.entry_text(title, s.isoformat(), e.isoformat()) for title, s, e in entries
+        )
+        offer = {
+            "key": secrets.token_hex(4),
+            "kind": "plan",
+            "plan": key,
+            "entries": [
+                {"title": title, "start": s.isoformat(), "end": e.isoformat()}
+                for title, s, e in entries
+            ],
+            "for": [self.profile.user_id, *self.profile.admins],
+            "items": [{"done": None}],
+            "ts": self.now().timestamp(),
+            "ttl": PLAN_TTL_S,
+        }
+        text = self.t("plan_offer", m=self.mention(), lines=lines)
+        try:
+            sent = self.send(chat, text, _keyboard(self.plan_rows(offer)))
+        except TelegramError as e:
+            log.warning("plan not offered: %s", safe(e))
+            return False
+        self.kv.set("calplan", key)
+        offer["msg"] = (sent or {}).get("message_id")
+        self.keep_offer(chat, offer)
+        plain = re.sub(r"<[^>]+>", "", text)
+        self.kv.add_chat(chat, "assistant", None, html.unescape(plain), int(now.timestamp()))
+        log.info("calendar plan offered n=%d", len(entries))
+        return True
+
+    def tapped_plan(self, cq: Mapping, chat: int, data: str, user: object, role: str) -> None:
+        """«En el calendario» under the plan: a turn in which the assistant adds the entries,
+        each approved by this tap; «Nada»: nothing. A plan that moved since it was offered is
+        not added: it is offered again."""
+        _, key, choice = [*data.split(":"), "", ""][:3]
+        mid = (cq.get("message") or {}).get("message_id")
+        offer = next((o for o in self.offers(chat) if o.get("key") == key), None)
+        if offer is None or self.now().timestamp() - offer.get("ts", 0) > offer.get(
+            "ttl", PLAN_TTL_S
+        ):
+            self.answer(cq["id"], self.t("tap_gone"))
+            if offer is None:
+                self.unbutton(chat, mid)
+            return
+        if user not in offer.get("for", []):
+            self.answer(cq["id"], self.t("tap_not_yours", name=self.plain_names(offer["for"])))
+            return
+        if choice not in ("y", "n"):
+            self.answer(cq["id"])
+            return
+        if choice == "y" and self.plan(self.repo.load(), self.today())[1] != offer.get("plan"):
+            offer["items"][0]["done"] = "timeout"
+            self.keep_offer(chat, offer)
+            self.rekey(chat, offer.get("msg"), self.plan_rows(offer))
+            self.kv.delete("calplan")  # the tick offers the new plan
+            self.answer(cq["id"], self.t("plan_moved"))
+            return
+        offer["items"][0]["done"] = "calendar" if choice == "y" else "nothing"
+        self.keep_offer(chat, offer)
+        self.answer(cq["id"])
+        self.rekey(chat, offer.get("msg"), self.plan_rows(offer))
+        if choice == "n":
+            log.info("calendar plan declined")
+            return
+        entries = offer.get("entries") or []
+        listing = "\n".join(json.dumps(e, ensure_ascii=False) for e in entries)
+        grant = {"by": user, "events": [dict(e) for e in entries]}
+        self.queue_tap(chat, mid, user, role, self.t("plan_calendar_turn", entries=listing), grant)
+        log.info("calendar plan to the calendar")
 
     # --- edits ---------------------------------------------------------------------------
 
@@ -2046,13 +2703,18 @@ class Bot:
         chat = msg.get("chat") or {}
         user = (msg.get("from") or {}).get("id")
         role = self.role(user)
-        if role is None or not self.has_assistant:
-            return
         private = chat.get("type") == "private"
         if not private and chat.get("id") != self.chat_id:
             return
+        if (role is None and private) or not self.has_assistant:
+            return
         chat_id, mid = chat["id"], msg.get("message_id")
         body = self._strip_mention(msg, text)[0].strip()
+        logged = self.kv.chat_find(chat_id, mid) if isinstance(mid, int) else None
+        if role is None:  # someone else's group line: only the log takes the new wording
+            if logged is not None:
+                self.relog(logged, body, self.sender(msg))
+            return
         key = f"pending:{chat_id}"
         found: list[dict] = []
 
@@ -2077,11 +2739,13 @@ class Bot:
                 self.kv.update_json(key, swap, [])
                 if found:
                     self._newest[chat_id] = self.clock()
+        name = self.who(role, user)
+        if logged is not None and (found or logged["asked"]):
+            self.relog(logged, body, name)
         if found:  # still queued: the debounce starts over with the new wording
             self.worker.submit(chat_id)
             log.info("edit: queued line")
             return
-        name = self.who(role, user)
         line = {"mid": mid, "admin": role == ADMIN, "uid": user, "body": body}
         line["ts"] = int(self.now().timestamp())
         line["id"] = f"e{mid}.{secrets.token_hex(3)}"
@@ -2119,8 +2783,24 @@ class Bot:
             return
         content = self.addressed(msg, text, private, role)
         if content is not None:
-            self.queue_text(chat_id, msg, content, role, body)
+            row = None
+            if logged is not None:  # logged before (seen, or answered long ago): one row
+                self.kv.chat_edit(logged["id"], content, body, asked=True)
+                row = logged["id"]
+            self.queue_text(chat_id, msg, content, role, body, row)
             log.info("edit: new message")
+        elif logged is not None and not logged["asked"]:
+            self.relog(logged, body, name)
+
+    def relog(self, logged: Mapping, body: str, name: str) -> None:
+        """An edited message's row in the chat log takes its new words, keeping what went in
+        front of them (a reply's quote, the sender's name)."""
+        old_text, old_body = str(logged.get("text") or ""), logged.get("body")
+        if isinstance(old_body, str) and old_body and old_text.endswith(old_body):
+            text = old_text[: len(old_text) - len(old_body)] + body
+        else:
+            text = f"{name}: {body}"
+        self.kv.chat_edit(logged["id"], text, body)
 
     # --- voice notes (hearing thread) ----------------------------------------------------
 
@@ -2146,8 +2826,18 @@ class Bot:
                 continue
             try:
                 content = self.hear(chat, line)
+                row = None
+                if content is not None:
+                    row = self.kv.add_chat(
+                        chat,
+                        "user",
+                        line.get("who"),
+                        content,
+                        int(line.get("ts") or self.now().timestamp()),
+                        mid=line["id"] if isinstance(line["id"], int) else None,
+                    )
 
-                def settle(cur, line_id=line["id"], content=content):
+                def settle(cur, line_id=line["id"], content=content, row=row):
                     out = []
                     for x in cur or []:
                         if x.get("id") == line_id and "voice" in x:
@@ -2155,6 +2845,7 @@ class Bot:
                                 continue
                             x = {k: v for k, v in x.items() if k not in ("voice", "who")}
                             x["content"] = content
+                            x["row"] = row
                         out.append(x)
                     return out or None
 

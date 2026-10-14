@@ -18,8 +18,10 @@ an import or a restart can never leave the bot in a state the log does not expla
 
 What is stored outside the log is bot plumbing in SQLite (`<data>/state/sct.sqlite`, git-ignored):
 the Telegram update offset, the day of the last scheduled ask, the assistant conversation id per chat,
-the messages the assistant has not seen yet (her words, in clear), and the skipped days. Losing that
-file costs at most one unanswered message and one repeated question.
+the messages the assistant has not seen yet (her words, in clear), the chat log that a fresh
+conversation is recapped from (5.2), the reminders set from the chat and the offers still waiting
+for a tap (5.6), and the skipped days. Losing that file costs at most one unanswered message, one
+repeated question, the recap and the reminders not yet posted.
 
 Two ways in, one truth:
 
@@ -356,14 +358,22 @@ same note twice. A note that cannot be heard leaves the list with one line under
 20 MiB is the largest file the Bot API lets a bot download. The echo is cut at 4,000 characters with
 «…»; the assistant gets the whole text. A caption on an audio file is not read.
 
+**Group talk as context.** With `telegram.history_scope: all`, every other text the bot receives in
+the group (an admin's plain text, anyone else's message) is kept in the chat log as a line that did
+not call the bot. It is never answered: it goes with the next turn as context, marked
+`[not to you] Name: text`, and the rules (5.3) say to act only on what is addressed to the assistant.
+An edit of such a line changes its wording in the log; an edit that adds the mention makes it a
+message, kept as the same row. With `asked`, the default, only the lines for the bot are kept.
+
 Cards cannot carry `force_reply`: Telegram allows one `reply_markup` per message, and buttons win there
 because they work with the assistant down.
 
 ### 4.4 Commands
 
 Spanish names first, English aliases second; both are accepted, and `/cmd@botname` too. The bot sets
-the menu itself with one `setMyCommands` call at start (default scope, the six she uses: hoy,
-resumen, anotar, hora, deshacer, ayuda); the admin commands are listed by `/ayuda` when an admin asks.
+the menu itself with one `setMyCommands` call at start (default scope, the seven she uses: hoy,
+resumen, anotar, hora, deshacer, recordatorios, ayuda); the admin commands are listed by `/ayuda` when
+an admin asks.
 Nothing is set in BotFather, which this call would overwrite anyway.
 
 | command | who | does |
@@ -373,8 +383,9 @@ Nothing is set in BotFather, which this call would overwrite anyway.
 | `/anotar` (`/log`) `<cuándo> <cuánto> [dolor] [síntomas…]` | her, admins | deterministic, no AI: `/anotar ayer mucho 6 calambres hinchazón`. `cuándo` is hoy, ayer, anteayer, a weekday (the most recent past one), `D/M` or `YYYY-MM-DD`; `cuánto` is nada, poco, normal, mucho; an integer 0..10 is pain; the rest are symptom labels matched by prefix |
 | `/hora` (`/time`) `HH:MM` | her, admins | deterministic, no AI: the hour of the daily ask, through the same check and the same commit as a `settings` block (5.5) |
 | `/deshacer` (`/undo`) | her, admins | undoes the last check-in: the uncommitted batch, else the last `log:` commit (2.2) |
+| `/recordatorios` (`/reminders`) | her, admins | the chat's reminders still to come (5.6), at most 20, each with a «Cancelar n» button |
 | `/estado` (`/status`) | admins | phase, whether today was asked and answered, the ask hour, when the assistant last answered, git sync state |
-| `/nuevo` (`/new`) | admins | drop the assistant conversation; the next turn starts fresh |
+| `/nuevo` (`/new`) | admins | drop the assistant conversation and the chat log; the next turn starts fresh |
 | `/presentacion` (`/about`) | admins | posts the introduction text once, when an admin asks for it (`sct say --intro` posts the same text from the host) |
 | `/ayuda` (`/help`) | anyone allowed | the list |
 
@@ -448,10 +459,25 @@ an edit can be compared with them.
 
 **Choices as buttons.** An answer may end with an ```` ```options ```` block, one `- label` per line
 (at most five, 40 characters each), or the plugin may return `options`. The app shows them as buttons
-under the answer, with «O cuéntame otra cosa.» under the text (for the pair Sí and No: «Toca Sí o No.
-Si quieres otra cosa, responde a este mensaje.»). Only the people the answer covered may tap, once,
-for 12 hours; a tap goes to the worker as that person's next message, with the label as its text, and
-the buttons give way to «✓ label». Nothing waits for a tap. The offers stay in `options:<chat>`.
+under the answer, with «O cuéntame otra cosa. Si no respondes, no hago nada.» under the text (for the
+pair Sí and No: «Toca Sí o No. Si quieres otra cosa, responde a este mensaje. Si no respondes, no
+hago nada.»). Only the people the answer covered may tap, once, for 12 hours; a tap goes to the
+worker as that person's next message, with the label as its text, and the buttons give way to
+«✓ label». Nothing waits for a tap, and nobody tapping does nothing: past the 12 hours the tick
+takes the buttons off and leaves one inert «Sin respuesta: nada». The offers stay in
+`options:<chat>`. The rules (5.3) make the assistant offer what it could do for her this way,
+proactively, and do it only after her yes.
+
+**The chat log.** Every line the app hands the assistant is also written to the `chat` table with
+its time, sender and Telegram message id: her lines and the admins' (typed, heard from a voice note,
+or tapped), the group lines that did not call the bot (with `history_scope: all`), and every answer
+posted, the reminders set and cancelled and the calendar plan offered. A turn gets two views of it:
+the group lines no kept turn has taken yet go into `new` as context (the newest 50, none older than 7
+days; the turn's kept answer moves the mark `ctx:<chat>` past them), and `history` is the log of the
+last `telegram.history_days` (14 by default, 0 for none) without the lines in `new`. A plugin that
+resumes its conversation needs only `new`; one that has to start over (a first turn, an expired
+session) recaps from `history`. The tick prunes the log hourly to `history_days`, and at least 7
+days. An edit rewrites its row, so recaps carry the final wording.
 
 **Asks.** A plugin that defines `answer` gets `turn["ask"]`: it calls it with an action the assistant
 wants to take, and the app posts the summary with Aprobar and Rechazar, as a reply to the newest
@@ -474,7 +500,9 @@ bot: día 3 de la regla. ¿Cómo va hoy?] ayer poco y hoy nada`.
 ### 5.3 What the assistant gets every turn
 
 **Rules** (`supercycletracker/rules.md`, English, shipped in the public repo, filled with `{name}`,
-`{language_name}`, `{others}`, `{symptom_ids}` and the profile's optional `assistant.instructions`):
+`{language_name}`, `{others}`, `{symptom_ids}`, `{reach}` (whether every message she writes in the
+group reaches the assistant: true when the bot reads the group, 4.3) and the profile's optional
+`assistant.instructions`):
 
 ```
 You are the cycle companion of {name} in a Telegram chat. The cycle is hers; {others} may also
@@ -484,6 +512,20 @@ short sentences unless she asks for more), plain text with no Markdown, links as
 Messages arrive as "Name: text". A reply carries "[replying to the bot: ...]" in front. A voice
 note carries "[voice note]" in front: her words through speech recognition, which can mishear
 a word, so when a fact you would record looks odd, ask her instead of guessing.
+
+Who is talking to you
+- People reach you by mentioning you, by replying to one of your messages, or with a voice note,
+  which is always heard: a voice note cannot mention you. {reach}
+- You may also see what people in the group say to each other: those lines start with
+  "[not to you]" and are context only. Never answer them, and act only on what is addressed to you.
+- A remark between people about you ("it also answers if you reply to it") is not a request: never
+  record a day, change a setting or the calendar, or ask for a change to the app because of it.
+  When a message from {name} is plainly said to someone else, treat it the same way.
+
+Several messages may reach you at once, and more may arrive while you work: they show up as new
+messages in this turn. Answer them all in one message, adapting to what came last. A message that
+starts with "[... edited a message ...]" is a correction: it shows the words before and now. Answer
+with the new wording in mind and say what changes, if anything.
 
 What you do
 - Help her log her period: bleeding (none, light, medium, heavy), pain 0-10, symptoms, a short note.
@@ -510,7 +552,8 @@ with heavy bleeding, sudden severe pelvic or abdominal pain, fever with pelvic p
 
 Recording
 When a message says how a day went, including earlier days ("ayer poco, hoy nada", "me bajó el
-martes"), end your answer with exactly one block and nothing after it:
+martes"), end your answer with exactly one block (only a settings, options or reminders block may
+follow it):
 
 ```record
 {"days": [{"date": "YYYY-MM-DD", "flow": "light", "pain": 3, "symptoms": ["headache"], "note": "..."}], "delete": []}
@@ -531,8 +574,8 @@ martes"), end your answer with exactly one block and nothing after it:
 
 Settings
 When she asks to change the hour the bot asks her, or up to which period day it asks every day,
-end your answer with one settings block (after the record block, if there is one) and nothing
-after it; the bot confirms what it changed:
+end your answer with one settings block (after the record block, if there is one); the bot
+confirms what it changed:
 
 ```settings
 {"ask_at": "21:30", "period_max_day": 7}
@@ -540,6 +583,57 @@ after it; the bot confirms what it changed:
 - "ask_at" is "HH:MM" from 05:00 to 23:59; "period_max_day" is a whole number from 3 to 14.
 - Send only the keys she wants changed; context.md has the current values.
 - If what she asks is outside those limits, tell her the limits and send no block.
+
+Choices as buttons
+When you put a question to her with a few concrete answers (whether a day was light or medium,
+which day she means, or a yes-or-no question such as whether to record something), you may offer
+the answers as buttons: end your answer with one options block, after any record or settings
+block, and nothing after it:
+
+```options
+- Sí
+- No
+```
+- At most five, each a few words (40 characters at most), in {language_name}. For a yes-or-no
+  question offer exactly the two words for yes and no.
+- Ask the question in your answer as usual; the bot shows the buttons under it and adds a line
+  saying she may also answer in her own words, so do not write that line.
+- A tap reaches you as her next message, with the label as its text. Nothing waits for a tap: she
+  may ignore the buttons and keep writing.
+
+Offers: be proactive, never pushy
+Whenever you can do something useful for her that she did not ask for (put the period start in her
+calendar, remind her two days before the next one, change the hour the bot asks), offer it as a
+short yes-or-no question with the Sí and No buttons, and do it only after her yes. One offer per
+answer at most, and never the same offer twice in a row if she ignored it. The bot adds a line
+saying that without an answer nothing happens, so do not write that line.
+
+The calendar plan
+When context.md has a "Calendar plan" and you can reach her calendar, those are the all-day entries
+her calendar should hold from today on: the predicted rest of this cycle and the next period, with
+fixed titles that other tools read. Use exactly the titles, dates and fields given, nothing else in
+them. When the plan changes (a period starts or ends, the prediction moves) or she asks, look at her
+calendar for entries with those titles from today on, then offer to add the missing ones, move the
+ones whose dates changed and delete the ones the plan no longer has. Never touch any other event.
+The bot also offers the plan itself, with a button, when it changes; a message saying she asked
+for it with that button is her yes.
+
+Reminders
+Whenever your answer tells her to do something at a time or on a day (take a painkiller at night,
+buy pads before the next period, write down how the day before felt), or she would gain from a
+heads-up (two days before the next period is expected), end your answer with one block, after any
+other block, listing each of those reminders:
+
+```reminders
+- 2025-04-09 21:00 | Mañana o pasado podría llegarte la regla
+```
+- One line each: the date and time in her timezone (context.md has today), then a short text written
+  to her in {language_name}. Only times still to come, at most five.
+- Do not ask in your text whether she wants a reminder, and never say one is set: the bot posts the
+  offer under your answer, with buttons for a reminder in the chat, in her calendar or nothing, and
+  says that without an answer nothing is done. You hear in the chat what she chose.
+- A message saying she asked with the calendar button of a reminder is her request to add that one
+  event to her calendar, at that time; that tap already approved that one addition.
 {instructions}
 ```
 
@@ -558,6 +652,12 @@ Missing days the bot still wants: Thursday 2025-03-13.
 Cycle lengths: 29, 32, 30, 27, 31, 30 (median 30, range 27-32). Usual period: 4 days.
 After this period: next start around 2025-04-11 (window 2025-04-08 .. 2025-04-13).
 
+# Calendar plan (all-day entries her calendar should have; end is exclusive)
+{"summary": "Fase folicular", "start": {"date": "2025-03-16"}, "end": {"date": "2025-03-29"}}
+{"summary": "Fase lútea", "start": {"date": "2025-03-29"}, "end": {"date": "2025-04-11"}}
+{"summary": "Regla prevista", "start": {"date": "2025-04-11"}, "end": {"date": "2025-04-15"}}
+Each entry from today on, written exactly as above: the same title, all-day dates, nothing else in it and nobody invited.
+
 # Calendar, last 14 days (use it for "ayer", "el martes"...)
 vie 2025-03-14 (today): -
 jue 2025-03-13: -
@@ -575,6 +675,8 @@ Lucía (whose cycle this is); Marta (admin)
 Every number above is invented (the weekdays are real: compute them with `datetime` before editing
 the example). The fixtures follow the same rule: `tests/fixtures/log_fictional.jsonl` is written from
 scratch with its own dates and a dozen starts, never copied or shifted from a real log.
+
+The calendar plan is there only with `calendar.events` in the profile (5.6).
 
 **Files:** `{"cycle/log.jsonl": <whole text>}`. A few kilobytes, so it goes whole.
 
@@ -622,6 +724,55 @@ The other direction is the hourly pull (section 8): a pull that changes `profile
 reload it on the same tick. A profile that fails the checks of `sct check` is refused, the old one
 stays in use and the log says `profile reload refused: <codes>`.
 
+### 5.6 Offers, the calendar plan and reminders
+
+Everything here is offered with buttons and done only after a tap; every offer says «Si no
+respondes, no hago nada.», expires, and an offer nobody answered gives way to «Sin respuesta: nada»
+and does nothing. She can ignore the buttons and keep talking.
+
+**The calendar plan** (`calendar.events: true`). `cycle.calendar_plan` turns the prediction into
+all-day entries: with `S` the last start, `P` the usual period length and `E` the expected next
+start, «Fase folicular» from the end of this period (`S + P`, or the day after its last bleed day
+when it ran longer) up to the luteal phase, «Fase lútea» for the 13 days before `E` (the textbook 14
+days counted from the day after ovulation, which is never shown, section 15), and «Regla prevista»
+from `E` for `P` days. Entries that ended before today are left out, and there is no plan without a
+prediction or once the period is late. `calendar.titles` renames an entry, and an empty title leaves
+it out. The plan goes into `context.md` (5.3) with the exact fields to write.
+
+The tick offers the plan in the group, between 10:00 and 22:00 local time, whenever its key changes:
+the last start, the expected start, the usual length and the titles (`calplan` holds the key last
+offered). So it is offered once per new prediction, never again for the same one, answered or not.
+The message names her and lists the entries in her words; «En el calendario» and «Nada» are for her
+and the admins, for 12 hours. A tap on «En el calendario» checks that the plan has not moved since
+(if it has, the toast says so and the next tick offers the new one), then becomes that person's
+message, `[pedido con el botón «En el calendario» de la previsión] Pon en mi calendario …` with the
+entries as JSON, and carries a **grant**: each ask of that turn (section 6) that adds exactly one of
+those entries (`action: "add"` and an `event` with the same title, start and end) is approved by the
+tap, once per entry, without asking again. The chat sees «Aprobado con el botón «En el calendario»:
+Fase lútea: del 16 de marzo al 28 de marzo» and «Hecho.» or why it failed. Any other ask of the turn (a
+second copy of an entry, a different date, a deletion) is asked with Aprobar as usual.
+
+**Reminders.** When an answer tells her to do something at a time, or she would gain from a heads-up,
+it ends with a ```` ```reminders ```` block, one `- YYYY-MM-DD HH:MM | text` per line (or the plugin
+returns `reminders: [{"when", "text"}]`). The app keeps the times still to come within 60 days, at
+most five, and posts one message under the answer: «{name}, ¿quieres que te lo recuerde?», each time
+and text, the line above, and per reminder «Recordatorio aquí», «En el calendario» (only with
+`calendar.reminders: true`) and «Nada». A reminder is for the person the answer was for (her, when it
+covered several people), and only they may tap, for 30 minutes.
+
+- «Recordatorio aquí» stores it in the `reminder` table; the tick posts «⏰ @her: text» in that chat
+  at its time, once, with «(con retraso: era para el …)» when it goes out more than 10 minutes late
+  (after a restart). A chat Telegram refuses for good marks it failed; any other failure is retried on
+  the next tick.
+- «En el calendario» becomes that person's message asking for one event at that time, with a grant
+  that the turn's first ask uses up: it is approved only when it adds an event whose start (`when`,
+  epoch seconds) is within a minute of the reminder's time; anything else is asked as usual.
+- `/recordatorios` lists the chat's reminders still to come with «Cancelar n» under each; a tap
+  cancels it once and its button says «✓ Cancelado n».
+
+Setting and cancelling a reminder, and offering the plan, go into the chat log, so the assistant
+knows what she chose.
+
 ## 6. The plugin contract (public app ⇄ assistant plugin)
 
 The app loads one Python file from the data directory. `profile.yaml` `assistant.plugin` gives its path;
@@ -653,7 +804,9 @@ as `converse`; text that is not a string is refused
   "rules": "<the rules text, section 5.3>",
   "context": "<context.md, section 5.3>",
   "files": {"cycle/log.jsonl": "<the whole file>"},
-  "new": [{"role": "user", "content": "Lucía: [replying to the bot: día 3 de la regla. ¿Cómo va hoy?] ayer poco y hoy nada"}]
+  "new": [{"role": "user", "content": "Lucía: [replying to the bot: día 3 de la regla. ¿Cómo va hoy?] ayer poco y hoy nada", "ts": "2025-03-14T20:14:05+00:00"}],
+  "history": [{"role": "user", "content": "[not to you] Marta: ¿compro ibuprofeno?", "ts": "2025-03-13T18:02:11+00:00"},
+              {"role": "assistant", "content": "Vale, lo apunto.", "ts": "2025-03-13T18:02:40+00:00"}]
 }
 ```
 
@@ -668,14 +821,19 @@ Two callables ride along, both safe to call from the plugin's own thread while `
   goes with the next turn. A plugin that never calls it covers nothing extra.
 - `ask(request)`, only when the plugin defines `answer`: `request` is `{"id": str, "summary": str,
   "confirm_by": "asker" | "admins", "expires_at": epoch seconds}`, an action the assistant wants to
-  take. It returns `True` once the ask is settled (posted, or declined at once through `answer` with
+  take. When the action adds a calendar event the request may also carry `"action": "add"` (or
+  `"change"`, `"delete"`), `"when"` (the event's start, epoch seconds, for a timed event) and
+  `"event": {"title", "start", "end"}` (the dates as written, `YYYY-MM-DD` for an all-day event): a
+  calendar button's grant approves an ask by those (5.6). It returns `True` once the ask is settled (posted, or declined at once through `answer` with
   `approved: false` and a note) and `False` when Telegram could not be reached: the plugin asks again
   later. On a tap the app calls `answer(request, {"approved": bool, "by": "<user id>", "note": str |
   None}, settings)`, which returns `{"ok": bool | None, "error": str | None}`.
 
-`new` holds every message the plugin has not kept yet, oldest first; it never contains the bot's own
-answers. There is no history or recap field: the log plus the context is the memory, so a provider
-that starts over loses nothing that matters.
+`new` holds every message the plugin has not kept yet, oldest first, each with `ts` (ISO 8601 UTC),
+and the group lines a kept turn has not taken yet, marked `[not to you]`; it never contains the bot's
+own answers. `history` is the chat log of the last `telegram.history_days` before this turn without
+the lines in `new`, oldest first: the user lines as they went to the assistant and the bot's answers
+(`role: assistant`). A plugin that keeps its conversation needs it only when it has to start over.
 
 `settings` is the `assistant:` mapping from `profile.yaml` minus `plugin` and `instructions`, for
 example `{"timeout_s": 600, "model": null}`.
@@ -692,6 +850,8 @@ Return value, either a bare string (no conversation kept) or:
 - `covers` (optional): the ids of handed-over lines the answer took in (see `incoming` above).
 - `options` (optional): choices to show as buttons under the answer, instead of an ```` ```options ````
   block in `text`.
+- `reminders` (optional): `[{"when": "YYYY-MM-DD HH:MM", "text"}]` to offer (5.6), instead of a
+  ```` ```reminders ```` block in `text`.
 - `kept: false` means the provider did not store the turn. The app treats it as a failed turn: it
   posts `ai_down`, applies no block from `text`, and sends the same `new` lines again with the next
   turn. A plugin that has a usable answer returns `kept: true` with it.
@@ -777,7 +937,7 @@ locale. English source strings and their Spanish translations:
 | `anotar_saved` | Noted without the assistant: {summary}. If that is wrong, /deshacer. | Anotado sin el asistente: {summary}. Si no es así, /deshacer. |
 | `new_conversation` | Starting a fresh conversation. What is noted stays. | Empiezo una conversación nueva. Lo apuntado sigue igual. |
 | `test_mark` | (test) | (prueba) |
-| `menu` | the descriptions of the five commands in the menu | idem |
+| `menu` | the descriptions of the seven commands in the menu | idem |
 | buttons | Yes, light · Yes, medium · Yes, heavy · Yes, another day · Not yet · Light · Medium · Heavy · Same as yesterday · It stopped · It had stopped that day · I don't remember · Tell you more · Other: I'll write it · Done · Nothing special · Fix · Back | Sí, poco · Sí, normal · Sí, mucho · Sí, otro día · Todavía no · Poco · Normal · Mucho · Igual que ayer · Ya no sangro · Ese día ya no sangraba · No me acuerdo · Contarte más · Otro: escríbemelo · Listo · Nada especial · Corregir · Volver |
 | flows | none · unspecified · light · medium · heavy | sin sangrado · sangrado · poco · normal · mucho |
 | `pain` | pain {n} | dolor {n} |
@@ -787,6 +947,12 @@ locale. English source strings and their Spanish translations:
 | `words_flow` | none: [none, nothing]; light: [light]; medium: [medium, normal]; heavy: [heavy] | none: [nada]; light: [poco, poquito]; medium: [normal]; heavy: [mucho] |
 | `words_when` | today, yesterday, day before yesterday | hoy, ayer, anteayer |
 | `help`, `intro` | the command list; the introduction an admin posts with /presentacion | idem |
+| `options_hint` / `yes_no_hint` | Or tell me something else. If you do not answer, I do nothing. / Tap Yes or No. If you want something else, reply to this message. If you do not answer, I do nothing. | O cuéntame otra cosa. Si no respondes, no hago nada. / Toca Sí o No. Si quieres otra cosa, responde a este mensaje. Si no respondes, no hago nada. |
+| `remind_offer` | {name}, shall I remind you? {lines} If you do not answer, I do nothing. | {name}, ¿quieres que te lo recuerde? {lines} Si no respondes, no hago nada. |
+| `remind_here` / `remind_calendar` / `remind_nothing` / `remind_timeout` | Reminder here / In the calendar / Nothing / No answer: nothing | Recordatorio aquí / En el calendario / Nada / Sin respuesta: nada |
+| `plan_offer` | {m}, shall I put your cycle forecast in your calendar? {lines} If you do not answer, I do nothing. | {m}, ¿pongo en tu calendario la previsión de tu ciclo? {lines} Si no respondes, no hago nada. |
+| `plan_period` / `plan_follicular` / `plan_luteal` | Expected period / Follicular phase / Luteal phase | Regla prevista / Fase folicular / Fase lútea |
+| `reminders_*`, `reminder_*`, `remind_set*`, `ask_preapproved`, `entry_*`, `plan_moved`, `*_turn` | /recordatorios, a reminder posted, the toasts, the approval a button gave, the message a calendar button sends | idem |
 
 `{m}` is the mention (`@username` or the HTML text mention); the bot's own templates go out with
 `parse_mode: HTML`. Assistant answers go out as plain text with `reply_parameters` to her message.
@@ -828,7 +994,10 @@ with the same `{placeholders}`; every Spanish string containing `?` also contain
   counts `git rev-list --count @{u}..HEAD` to say how many commits are not pushed. The time of the last
   successful assistant turn is in memory too; both reset on a restart and `/estado` says so.
 - `<data>/state/sct.sqlite` is git-ignored. One table `kv(key TEXT PRIMARY KEY, value TEXT)` holding
-  exactly: `offset`, `last_ask`, `conv:<chat>`, `pending:<chat>`, `skip:<date>`, `migrated_chat`.
+  exactly: `offset`, `last_ask`, `conv:<chat>`, `pending:<chat>`, `said:<chat>`, `options:<chat>`,
+  `remind:<chat>` (the reminder and plan offers waiting for a tap), `ctx:<chat>` (the last group line
+  a kept turn took), `calplan`, `skip:<date>`, `migrated_chat`; any other key is refused. Two more
+  tables: `chat`, the chat log (5.2), and `reminder`, the reminders set from the chat (5.6).
   Everything else (`/estado` facts, what was already said, undo) is read from git, the log or the
   `Change`. The connection is opened with `check_same_thread=False` behind one lock, since the worker
   thread writes too.
@@ -900,6 +1069,9 @@ joins a group or its abilities change.
   exception's class and HTTP status, and its `str()` only for the app's own exception classes, whose
   messages are reason codes; a plugin's or a library's exception text may quote her words or the
   assistant's and is never logged.
+- The chat log (5.2) keeps the words of the chat in `state/sct.sqlite`, beside the pending lines,
+  never in the service log or git: `group line logged`, `chat log pruned rows=3`, `reminders offered
+  n=1`, `reminder posted`, `calendar plan offered n=3`.
 - A voice note's transcript is her words: it is echoed to the chat and handed to the assistant, and
   never logged. The log says `voice queued`, `voice heard` or `voice not heard: voice_failed`. A
   `later` job's result and its exception text are never logged either (`later done 41s`, `later
@@ -933,6 +1105,8 @@ joins a group or its abilities change.
 | `test_bot.py` | the three-tap flow edits one message; a start from the card asks about the day before, a toggle there writes a symptom-only day and leaves the start alone, and the step is skipped when that day already says something or the day is not a start; the eve toggles follow what she logs there most; `/resumen` tells the day-before pattern from three starts on; `period_max_day` from the profile moves the last daily ask; a `settings` block rewrites the profile by line, commits, pushes and takes effect, a refused one (each reason, and broken JSON) changes nothing; `/hora` needs no assistant and the next tick asks at the new hour; a profile pulled from the remote is reloaded and a bad one refused; `set_profile_lines` keeps every other byte; `/estado` shows the ask hour; a stale keyboard works by date; a callback dated 91 days back gets the toast and writes nothing; «Igual que ayer»; the picker; «Ya no sangro» closes and posts the closing line; a close undone and redone posts it again; day 7 line; pain 9 sends `pain_high` once, 9 again does not, 3 then 9 does; «Contarte más» sends selective force_reply with the mention; a reply triggers a turn with the turn shape of section 6; a message mentioning the bot does too; the record is written and the confirmation is built from the Change; a block whose days are unchanged posts no «Anotado:»; a future-dated block writes nothing; plugin raises, the keyboard comes and the line stays pending; `kept: false` posts `ai_down`, writes nothing, and the resend yields exactly one answer; 20 queued lines are capped to 10 and the next turn succeeds; `/nuevo` clears pending lines; a message arriving mid-turn is not dropped; an answer ending in "?" carries force_reply; plain group text from her ignored with privacy on, answered with privacy off, an admin's plain text ignored in both; a stranger's tap gets the toast; `/anotar ayer mucho 6 calambres`; `/estado` admin-only and every phase kind renders through a locale key; migration; a voice note with no mention is heard, echoed under the note and sent as `[voice note]`; an audio file and an admin's note in private; strangers' and other chats' notes ignored; `voice_off` (no plugin, no `transcribe`, `NotImplementedError`), `voice_failed` (plugin, empty text, download, `getFile`) and `voice_too_long` (on arrival and from `getFile`); a heard note is never heard twice; the echo is escaped and cut; a bot that is a group admin reads her plain text; `later` posts after the answer, fails with `later_failed`, says nothing when empty, runs one job at a time in order without holding turns, and never runs for a turn not kept |
 | `test_repo.py` | one commit after 60 s quiet for three taps; flush on SIGTERM; the human clone pushes a profile edit between the bot's commit and push, the bot rebases and both land; the human clone changes a line of `log.jsonl` the bot also changed: the pull completes, the bot's line wins, the human's other edits survive, the push lands; the remote refuses the push (a hook that exits 1): the commit stays, `/estado` counts it, the next flush pushes after the hook is removed (positive control); `/deshacer` on a dirty file restores HEAD with no commit, on a clean `log:` HEAD makes an `undo:` commit, and on an `undo:` HEAD says nothing to undo; a pull that changes the profile raises the reload flag and one that changes only the log does not; `write_profile` commits the profile alone (a dirty log stays out), `flush` pushes it, and a refused or failed commit leaves the file and the index as they were (a pre-commit hook that exits 1, then removed as the positive control); commit messages contain no flow or symptom words; the token never appears in `git config` |
 | `test_applehealth.py` | a fictional export in a zip with a localised member name and a `_cda.xml` beside it; the three value forms; metadata child counted; `NotPresent` skipped; heaviest of a day; `IntermenstrualBleeding` to `spotting`; a `startDate` at 23:30 +0000 lands on the next day in the profile timezone; chat days never overwritten; a rerun is a no-op; `--dry-run` writes nothing |
+| `test_turns.py` | section 5.2: one answer per burst, lines handed to a running turn, edits, choices as buttons, asks |
+| `test_offers.py` | the chat log: group talk goes to the next turn as `[not to you]` context once and is never answered, nothing is kept with `asked`, a failed turn keeps it, the recap leaves out the new lines and reaches back `history_days` only (0: none), edits rewrite the log and one that adds the mention keeps one row, `/nuevo` forgets it; an offer says no answer does nothing and expires into «Sin respuesta: nada»; the rules say who reaches the assistant; the calendar plan's dates (and none once late), its place in `context.md`, its offer once per key in waking hours with configurable titles, one tap approving exactly its entries, a moved plan offered again, «Nada» and strangers; reminders offered (past ones dropped, the calendar button only when set), posted once at their time, late after a restart, listed and cancelled, expiring, the calendar button approving that one addition and no other time, only for the person answered, and the block parsed strictly |
 | `test_i18n.py`, `test_privacy.py` | sections 7 and 11 |
 
 Each CI gate (ruff, pytest) is shown failing once on a mutated line before it is trusted.
@@ -944,19 +1118,20 @@ supercycletracker/
   __init__.py        __version__
   cli.py             sct run | check | predict | import-apple-health | say --ask | say --intro
   records.py         FLOWS, SYMPTOMS, load/save, derive_starts, validate_block, apply -> Change
-  cycle.py           bot_day, predict, phase, queue; pure, today passed in
+  cycle.py           bot_day, predict, phase, queue, calendar_plan; pure, today passed in
   i18n.py            Translator; locales/en.yaml, locales/es.yaml
   telegram.py        urllib Bot API client, TelegramError, safe()
   bot.py             loop, tick, handlers, cards, commands, worker queue
   assistant.py       plugin loading, turn, context.md, extract
   rules.md           the assistant rules (5.3)
-  repo.py            SQLite kv, DATA_LOCK, atomic write, git flush, git undo
+  repo.py            SQLite kv, chat log and reminders, DATA_LOCK, atomic write, git flush, git undo
   applehealth.py     the importer
 tests/
   conftest.py        FakeTelegram, Clock, data_repo (bare remote + bot clone + human clone)
   fixtures/          fake_plugin.py, export_fictional.xml, log_fictional.jsonl
-  test_records.py test_cycle.py test_schedule.py test_bot.py test_repo.py
-  test_applehealth.py test_i18n.py test_privacy.py
+  test_records.py test_cycle.py test_schedule.py test_bot.py test_turns.py test_offers.py
+  test_repo.py test_assistant.py test_cli.py test_telegram.py test_applehealth.py test_i18n.py
+  test_privacy.py
 docs/DESIGN.md       this file
 Dockerfile           python:3.12.<patch>-slim pinned, uv pinned, git + ca-certificates,
                      uv sync --frozen --no-dev, HOME=/tmp, USER 1000:1000, no EXPOSE,
@@ -1006,11 +1181,17 @@ telegram:
   user_id: 111              # whose cycle this is
   username: lucia_example   # optional: makes selective force_reply target her by @mention
   admins: {222: Marta}      # may use /estado, /nuevo, /presentacion, and log for her
+  history_scope: asked      # asked | all: all keeps the group's other messages as context (4.3)
+  history_days: 14          # 0..60: the chat log a fresh conversation is recapped from (5.2)
 assistant:                  # optional; without it the bot is buttons and commands only
   plugin: plugins/assistant.py
   timeout_s: 600
   model: null
   instructions: ""          # appended to the rules
+calendar:                   # optional; for a plugin that can reach her calendar (5.6)
+  events: false             # offer the predicted phases and the next period as all-day entries
+  reminders: false          # a reminder offered in the chat can also go in the calendar
+  titles: {}                # per entry (follicular, luteal, period): another title, "" for none
 ```
 
 **What is committed:** `cycle/log.jsonl` by the bot (one commit per check-in), everything else by
@@ -1041,11 +1222,13 @@ the new tag on its own.
   tested assistant path.
 - **Several tracked people per instance.** A second person is a second container and data directory.
 - **A web UI, published ports.**
-- **A stored state machine, a chat history table, an op journal, an undo table.** The log plus the
-  date is the state; git is the journal and the undo; the assistant's own session is the chat memory.
+- **A stored state machine, an op journal, an undo table.** The log plus the date is the state; git
+  is the journal and the undo. The chat log (5.2) is memory for the assistant, never state: nothing
+  about the cycle is read from it.
 - **A morning nudge.** One scheduled message per day; the missed day rides on the next evening's card.
 - **Ovulation, fertility or pregnancy predictions.** Not asked for, and the stakes of a wrong one are
-  high.
+  high. The calendar plan's phases (5.6) split the cycle at the textbook point and name no
+  ovulation day.
 - **A spotting flow value.** Spotting is a symptom so it can never move a cycle start.
 - **Markdown in assistant replies.** Plain text means no HTML converter and no parse failures.
 - **Background retries of failed assistant turns.** The buttons are the fallback, and her unseen

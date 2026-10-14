@@ -22,6 +22,8 @@ SuperCycleTracker is a menstrual cycle tracker that lives in a Telegram group. I
 - In the group it reads replies to the bot, answers to its questions, commands, and messages that mention it when Telegram delivers them; as a group admin it reads all of her messages. Voice notes from her or an admin are always heard, when the plugin can transcribe. It also answers private chats with her or an admin.
 - Works without any AI: buttons and `/anotar` write records directly. An optional assistant plugin reads free text and answers questions.
 - A burst of messages gets one answer, and what she writes while it thinks joins that answer. An edited message is taken into account. Choices come as buttons she can tap or ignore, and an action the assistant wants to take waits for Approve or Reject.
+- Optionally reads the rest of the group as context, marked as not addressed to it, and keeps a chat log so a fresh conversation starts from the last two weeks of the chat. A remark between people is never taken as an order.
+- Offers what it can do instead of doing it unasked: a reminder here or in her calendar, or the predicted phases and next period as calendar entries, with buttons. Without an answer nothing happens, and `/recordatorios` lists and cancels the reminders set.
 - Every string is translatable. English and Spanish ship.
 - Keeps the records in a private git repository you own, one commit per check-in, with `/deshacer` as undo.
 
@@ -53,7 +55,7 @@ Or with Docker, the data directory mounted at `/data` and owned by uid 1000:
 ```sh
 docker run -d --name supercycletracker \
   -e TELEGRAM_BOT_TOKEN -e SCT_GIT_TOKEN -e TZ=Europe/Madrid \
-  -v "$PWD/data:/data" drumsergio/supercycletracker:0.1.0
+  -v "$PWD/data:/data" drumsergio/supercycletracker:0.4.0
 ```
 
 Only one process may poll a bot token. `sct say` does not poll, so it is safe beside the running bot.
@@ -81,11 +83,17 @@ telegram:
   user_id: 111              # whose cycle this is
   username: lucia_example   # optional: lets the reply box open on her phone by itself
   admins: {222: Marta}      # may use /estado, /nuevo, /presentacion and log for her
+  history_scope: asked      # asked | all: all keeps the group's other messages as context
+  history_days: 14          # the chat log a fresh assistant conversation starts from
 assistant:                  # optional; without it the bot is buttons and commands only
   plugin: plugins/assistant.py
   timeout_s: 600
   model: null
   instructions: ""          # appended to the assistant's rules
+calendar:                   # optional; for a plugin that can reach her calendar
+  events: false             # offer the predicted phases and next period as calendar entries
+  reminders: false          # a reminder can also go in the calendar
+  titles: {}                # e.g. {luteal: "Fase lútea", follicular: ""}; "" leaves one out
 ```
 
 ## Commands
@@ -97,12 +105,13 @@ assistant:                  # optional; without it the bot is buttons and comman
 | `/anotar ayer mucho 6 calambres` | her, admins | note a day without the assistant |
 | `/hora 21:30` | her, admins | change the hour of the daily question |
 | `/deshacer` | her, admins | undo the last check-in |
+| `/recordatorios` | her, admins | the reminders to come, each with a button to cancel it |
 | `/ayuda` | her, admins | the list |
 | `/estado` | admins | phase, today's question, the assistant, git sync |
 | `/nuevo` | admins | start a fresh assistant conversation |
 | `/presentacion` | admins | post the introduction |
 
-English aliases work too: `/today`, `/summary`, `/log`, `/time`, `/undo`, `/help`, `/status`, `/new`, `/about`. `sct say --intro` posts the introduction from the host.
+English aliases work too: `/today`, `/summary`, `/log`, `/time`, `/undo`, `/reminders`, `/help`, `/status`, `/new`, `/about`. `sct say --intro` posts the introduction from the host.
 
 ## The assistant plugin
 
