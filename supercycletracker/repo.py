@@ -46,16 +46,32 @@ DERIVE_PREFIX = "derive: "  # flags moved by a pull; not a check-in, so never un
 
 # --- SQLite kv -----------------------------------------------------------------------------
 
-KV_KEYS = frozenset({"offset", "last_ask", "migrated_chat"})
-KV_PREFIXES = ("conv:", "pending:", "skip:", "said:", "options:")
+KV_KEYS = frozenset({"offset", "last_ask", "migrated_chat", "calplan"})
+KV_PREFIXES = ("conv:", "pending:", "skip:", "said:", "options:", "ctx:", "remind:")
+CHAT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS chat (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER NOT NULL, ts INTEGER NOT NULL,
+  role TEXT NOT NULL, who TEXT, text TEXT NOT NULL, body TEXT, mid INTEGER, asked INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_by_chat ON chat (chat, id);
+CREATE TABLE IF NOT EXISTS reminder (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, chat INTEGER NOT NULL, uid INTEGER, at REAL NOT NULL,
+  text TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', by INTEGER, created INTEGER NOT NULL
+);
+"""
 
 
 class KV:
     """One table `kv(key, value)`. It holds exactly `offset`, `last_ask`, `conv:<chat>`,
     `pending:<chat>`, `said:<chat>` (the last answered messages, so an edit can be compared),
-    `options:<chat>` (the choices under recent answers), `skip:<date>` and `migrated_chat`; any
-    other key is refused, so nothing else about the cycle can creep into a second store. Safe
-    across threads."""
+    `options:<chat>` (the choices under recent answers), `remind:<chat>` (reminders and calendar
+    entries offered with buttons), `ctx:<chat>` (the last chat log row a turn took as context),
+    `calplan` (the calendar entries last offered), `skip:<date>` and `migrated_chat`; any other
+    key is refused, so nothing else about the cycle can creep into a second store.
+
+    Two more tables: `chat`, the chat log (every message of the chats the bot serves that it
+    keeps, and its answers, for the assistant's recap), and `reminder`, the one-off reminders set
+    from the chat. Safe across threads."""
 
     def __init__(self, path: str | Path):
         path = Path(path)
@@ -68,6 +84,7 @@ class KV:
             self._db.execute(
                 "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
+            self._db.executescript(CHAT_SCHEMA)
 
     @staticmethod
     def _check(key: str) -> None:
@@ -123,6 +140,113 @@ class KV:
                     (key, json.dumps(value, ensure_ascii=False)),
                 )
         return value
+
+    # --- the chat log ------------------------------------------------------------------
+
+    def add_chat(
+        self,
+        chat: int,
+        role: str,
+        who: str | None,
+        text: str,
+        ts: int,
+        *,
+        body: str | None = None,
+        mid: int | None = None,
+        asked: bool = True,
+    ) -> int:
+        """Log one line: `role` user or assistant; `asked` False for a group message that did
+        not call the bot. Returns its row id."""
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO chat (chat, ts, role, who, text, body, mid, asked) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (chat, int(ts), role, who, text, body, mid, int(bool(asked))),
+            )
+            return int(cur.lastrowid)
+
+    def chat_rows(self, chat: int, since: int, upto: int | None = None) -> list[dict]:
+        """The chat's rows written at `since` (epoch seconds) or later, with a row id up to
+        `upto`, oldest first."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, ts, role, who, text, body, mid, asked FROM chat "
+                "WHERE chat = ? AND ts >= ? AND id <= ? ORDER BY id",
+                (chat, int(since), upto if upto is not None else 2**62),
+            ).fetchall()
+        keys = ("id", "ts", "role", "who", "text", "body", "mid", "asked")
+        return [dict(zip(keys, r, strict=True)) for r in rows]
+
+    def chat_last(self, chat: int) -> int:
+        """The newest row id of the chat's log, 0 without one."""
+        with self._lock:
+            row = self._db.execute("SELECT MAX(id) FROM chat WHERE chat = ?", (chat,)).fetchone()
+        return int(row[0] or 0)
+
+    def chat_find(self, chat: int, mid: int) -> dict | None:
+        """The newest user row of a Telegram message, or None."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT id, text, body, asked FROM chat WHERE chat = ? AND mid = ? AND role = "
+                "'user' ORDER BY id DESC LIMIT 1",
+                (chat, mid),
+            ).fetchone()
+        return dict(zip(("id", "text", "body", "asked"), row, strict=True)) if row else None
+
+    def chat_edit(self, row: int, text: str, body: str, asked: bool | None = None) -> None:
+        """An edited message keeps its row, so later turns and recaps see its final wording."""
+        with self._lock:
+            if asked is None:
+                self._db.execute(
+                    "UPDATE chat SET text = ?, body = ? WHERE id = ?", (text, body, row)
+                )
+            else:
+                self._db.execute(
+                    "UPDATE chat SET text = ?, body = ?, asked = ? WHERE id = ?",
+                    (text, body, int(asked), row),
+                )
+
+    def chat_clear(self, chat: int) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM chat WHERE chat = ?", (chat,))
+
+    def chat_prune(self, before: int) -> int:
+        """Drop every row written before `before` (epoch seconds); returns how many."""
+        with self._lock:
+            return self._db.execute("DELETE FROM chat WHERE ts < ?", (int(before),)).rowcount
+
+    # --- one-off reminders ------------------------------------------------------------
+
+    def add_reminder(self, chat: int, uid: int | None, at: float, text: str, by, now: int) -> int:
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO reminder (chat, uid, at, text, by, created) VALUES (?, ?, ?, ?, ?, ?)",
+                (chat, uid, float(at), text[:500], by, int(now)),
+            )
+            return int(cur.lastrowid)
+
+    def reminders(self, chat: int | None = None, state: str = "pending") -> list[dict]:
+        """The reminders in `state` (of one chat, or every chat), soonest first."""
+        q, args = "SELECT id, chat, uid, at, text, state FROM reminder WHERE state = ?", [state]
+        if chat is not None:
+            q += " AND chat = ?"
+            args.append(chat)
+        with self._lock:
+            rows = self._db.execute(q + " ORDER BY at, id", args).fetchall()
+        keys = ("id", "chat", "uid", "at", "text", "state")
+        return [dict(zip(keys, r, strict=True)) for r in rows]
+
+    def due_reminders(self, now: float) -> list[dict]:
+        return [r for r in self.reminders() if r["at"] <= now]
+
+    def settle_reminder(self, rid: int, state: str) -> bool:
+        """Move a pending reminder to `sent`, `cancelled` or `failed`; False when it was no
+        longer pending, so two taps (or a tap and the clock) settle it once."""
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE reminder SET state = ? WHERE id = ? AND state = 'pending'", (state, rid)
+            )
+            return cur.rowcount == 1
 
     def close(self) -> None:
         with self._lock:

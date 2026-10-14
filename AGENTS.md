@@ -18,7 +18,8 @@ Run the test suite once per change. It drives real git repositories in temp dirs
 - This is health data. Never log personal data or message contents, and never write a record anywhere except the private data repo the household owns.
 - Code never knows a person, a chat or a date of a real cycle. Those live in the data repo. Keep every example and test fictional.
 - Every user-facing string is translatable. English is the source; Spanish ships too, and the bot talks Spanish to its users.
-- In the group the bot reads replies to the bot, answers to its questions, commands, and messages that mention it when Telegram delivers them (as a group admin, all of her messages). Voice notes from her or an admin are always processed. It also answers private chats with her or an admin.
+- In the group the bot reads replies to the bot, answers to its questions, commands, and messages that mention it when Telegram delivers them (as a group admin, all of her messages). Voice notes from her or an admin are always processed. It also answers private chats with her or an admin. With `history_scope: all` the group's other messages go to the assistant as context marked `[not to you]`, never answered.
+- Whatever the bot offers to do (a reminder, calendar entries) waits for a tap; without one nothing happens.
 - The tracker syncs to a private remote named in `.beads/config.yaml`, never to this public repo. Nothing written here names the server behind it.
 - Conventional commits. PR titles say why, not what.
 

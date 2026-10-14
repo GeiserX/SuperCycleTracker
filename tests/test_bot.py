@@ -506,15 +506,26 @@ def test_a_reply_triggers_a_turn_with_the_contract_shape(make_bot):
     calls = plugin(bot).CALLS
     assert len(calls) == 1
     turn = calls[0]["turn"]
-    assert set(turn) == {"conversation", "rules", "context", "files", "new", "incoming", "ask"}
+    assert set(turn) == {
+        "conversation",
+        "rules",
+        "context",
+        "files",
+        "new",
+        "history",
+        "incoming",
+        "ask",
+    }
     assert callable(turn["incoming"]) and callable(turn["ask"])
     assert turn["conversation"] is None
     assert turn["new"] == [
         {
             "role": "user",
             "content": f"Lucía: [replying to the bot: {QUESTION}] ayer poco y hoy nada",
+            "ts": "2027-03-04T20:00:00+00:00",
         }
     ]
+    assert turn["history"] == []  # nothing was said before it
     assert turn["files"] == {"cycle/log.jsonl": bot.repo.log_path.read_text(encoding="utf-8")}
     assert "Answer in Spanish" in turn["rules"]
     assert "Bot day 2027-03-04" in turn["context"]
@@ -953,7 +964,7 @@ def test_without_an_assistant_free_text_gets_no_ai_and_the_keyboard(make_bot):
 # --- commands ------------------------------------------------------------------------------
 
 
-def test_the_menu_is_set_once_with_her_six_commands(make_bot):
+def test_the_menu_is_set_once_with_her_seven_commands(make_bot):
     bot = make_bot()
     bot.set_commands()
     (call,) = bot.tg.of("setMyCommands")
@@ -963,6 +974,7 @@ def test_the_menu_is_set_once_with_her_six_commands(make_bot):
         "anotar",
         "hora",
         "deshacer",
+        "recordatorios",
         "ayuda",
     ]
     assert "scope" not in call  # the default scope
@@ -1388,8 +1400,8 @@ def test_a_voice_note_is_heard_echoed_and_answered_without_a_mention(make_bot):
     echo, answer = bot.tg.of("sendMessage")
     assert echo["text"] == "🎤 me ha bajado hoy, poco"
     assert under(echo, msg)
-    assert mod.CALLS[0]["turn"]["new"] == [
-        {"role": "user", "content": "Lucía: [voice note] me ha bajado hoy, poco"}
+    assert [x["content"] for x in mod.CALLS[0]["turn"]["new"]] == [
+        "Lucía: [voice note] me ha bajado hoy, poco"
     ]
     assert answer["text"] == "Vale." and under(answer, msg)
     assert bot.kv.get_json(f"pending:{GROUP}") is None

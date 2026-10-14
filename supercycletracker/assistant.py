@@ -8,8 +8,10 @@ log and her new lines, and takes back text that may end with one fenced `record`
 
 While a turn runs, the plugin may take the messages that arrived since it started
 (`turn["incoming"]()`) and name in its answer the ones it covered (`covers`); the rest go with the
-next turn. It may offer choices as buttons under its answer (`options`), and, when it defines
-`answer`, ask a person to approve an action it wants to take (`turn["ask"]`).
+next turn. It may offer choices as buttons under its answer (`options`), list reminders the app
+offers with buttons (`reminders`), and, when it defines `answer`, ask a person to approve an
+action it wants to take (`turn["ask"]`). `turn["history"]` is the chat's recent log, for a
+provider that has to start a conversation over.
 
 Nothing here logs: errors are `PluginError` reason codes, and a plugin's own exception goes up to
 the caller, which logs its class only (`telegram.safe`).
@@ -50,6 +52,9 @@ _UNCLOSED = {k: re.compile(rf"```{k}\b.*\Z", re.DOTALL) for k in BLOCK_KINDS}
 BAD_BLOCK = object()  # `extract` found a block whose JSON does not parse
 OPTIONS_MAX, OPTION_CHARS = 5, 40  # choices offered as buttons under an answer
 _OPTIONS = re.compile(r"\n?```options[^\S\n]*\n(.*?)```[^\S\n]*", re.DOTALL)
+REMINDERS_MAX, REMINDER_CHARS = 5, 300  # reminders an answer may offer
+_REMINDERS = re.compile(r"\n?```reminders[^\S\n]*\n(.*?)```[^\S\n]*", re.DOTALL)
+_WHEN = re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}")
 
 
 class PluginError(Exception):
@@ -137,11 +142,12 @@ class Reply:
     later: Callable[[], str] | None = None  # slow work the app runs after posting `text`
     covers: frozenset = frozenset()  # ids of handed-over messages the answer took in
     options: tuple[str, ...] = ()  # choices to offer as buttons under the answer
+    reminders: tuple[dict, ...] = ()  # {"when": "YYYY-MM-DD HH:MM", "text"} to offer
 
 
 def reply(out: object) -> Reply:
     """A plugin's return value: a bare string, or `{"text", "conversation", "kept", "later",
-    "covers", "options"}`."""
+    "covers", "options", "reminders"}`."""
     if isinstance(out, str):
         return Reply(out)
     if isinstance(out, Mapping):
@@ -160,7 +166,15 @@ def reply(out: object) -> Reply:
             if isinstance(covers, list | tuple)
             else frozenset()
         )
-        return Reply(text, conversation or None, kept, later, ids, options(out.get("options")))
+        return Reply(
+            text,
+            conversation or None,
+            kept,
+            later,
+            ids,
+            options(out.get("options")),
+            reminders(out.get("reminders")),
+        )
     raise PluginError("bad_reply")
 
 
@@ -184,6 +198,40 @@ def extract_options(text: str) -> tuple[str, tuple[str, ...]]:
     labels = [x[1:].strip() for x in lines if x.startswith(("-", "*"))]
     clean = re.sub(r"\n{3,}", "\n\n", _OPTIONS.sub("", text)).strip()
     return clean, options(labels)
+
+
+def reminders(raw: object) -> tuple[dict, ...]:
+    """Well-formed reminders: a time written `YYYY-MM-DD HH:MM` and a short text, distinct, at
+    most REMINDERS_MAX; anything else is dropped. Whether the time is still to come is the app's
+    to judge when it offers them."""
+    out: list[dict] = []
+    for r in raw if isinstance(raw, list | tuple) else ():
+        if not isinstance(r, Mapping):
+            continue
+        when = str(r.get("when") or "").strip()
+        text = " ".join(str(r.get("text") or "").split())
+        if not _WHEN.fullmatch(when) or not text or len(text) > REMINDER_CHARS:
+            continue
+        item = {"when": when.replace("T", " "), "text": text}
+        if item not in out:
+            out.append(item)
+    return tuple(out[:REMINDERS_MAX])
+
+
+def extract_reminders(text: str) -> tuple[str, tuple[dict, ...]]:
+    """The answer without its ```reminders block, and the reminders the last block lists, one
+    `- YYYY-MM-DD HH:MM | text` per line."""
+    blocks = list(_REMINDERS.finditer(text))
+    if not blocks:
+        return text, ()
+    found = []
+    for line in blocks[-1].group(1).splitlines():
+        line = line.strip()
+        if line.startswith(("-", "*")) and "|" in line:
+            when, _, what = line[1:].partition("|")
+            found.append({"when": when.strip(), "text": what.strip()})
+    clean = re.sub(r"\n{3,}", "\n\n", _REMINDERS.sub("", text)).strip()
+    return clean, reminders(found)
 
 
 # per plugin path and function: a call that outlived its wait
@@ -290,25 +338,53 @@ def forget(data: str | Path, rel: str | None, conversation: str, plugin_settings
 
 
 def turn(
-    conversation: str | None, rules_text: str, context_text: str, log_text: str, new: Sequence[str]
+    conversation: str | None,
+    rules_text: str,
+    context_text: str,
+    log_text: str,
+    new: Sequence[str | Mapping],
+    history: Sequence[Mapping] = (),
 ) -> dict:
-    """The dict a plugin's `converse` gets (the frozen contract): her lines only, oldest first."""
+    """The dict a plugin's `converse` gets: the new lines oldest first (a line is its text, or
+    `{"content", "ts"}`), and the chat's earlier log as `history` (`{"role", "content", "ts"}`,
+    oldest first) for a provider that has to start the conversation over."""
+    lines = []
+    for x in new:
+        item = {"role": "user", "content": x if isinstance(x, str) else x["content"]}
+        if isinstance(x, Mapping) and x.get("ts"):
+            item["ts"] = x["ts"]
+        lines.append(item)
     return {
         "conversation": conversation,
         "rules": rules_text,
         "context": context_text,
         "files": {LOG_KEY: log_text},
-        "new": [{"role": "user", "content": content} for content in new],
+        "new": lines,
+        "history": [dict(h) for h in history],
     }
 
 
-def rules(name: str, language: str, others: Sequence[str] = (), instructions: str = "") -> str:
-    """`rules.md` filled in. Plain replacement, not `str.format`: the text holds JSON braces."""
+def rules(
+    name: str,
+    language: str,
+    others: Sequence[str] = (),
+    instructions: str = "",
+    her_text: bool = False,
+) -> str:
+    """`rules.md` filled in. Plain replacement, not `str.format`: the text holds JSON braces.
+    `her_text`: every message she writes in the group reaches the assistant, mention or not."""
+    reach = (
+        f"In the group, every message {name} writes reaches you too, because the group is about "
+        f"her cycle; the others' messages reach you only in those three ways."
+        if her_text
+        else "Text without a mention or a reply does not reach you as a message."
+    )
     values = {
         "name": name,
         "language_name": LANGUAGE_NAMES.get(language, language),
         "others": _join(others) or "her family",
         "symptom_ids": ", ".join(SYMPTOMS),
+        "reach": reach,
         "instructions": (instructions or "").strip(),
     }
     text = RULES.read_text(encoding="utf-8")
@@ -355,8 +431,10 @@ def context(
     asked: bool = False,
     skipped: Collection[date] = (),
     period_max_day: int = cycle.PERIOD_MAX_DAY,
+    plan: Sequence[tuple[str, date, date]] = (),
 ) -> str:
-    """`context.md`, rebuilt every turn: the date, where she is, the prediction, a calendar of
+    """`context.md`, rebuilt every turn: the date, where she is, the prediction, the calendar
+    plan (`(title, start, end exclusive)` entries, when the profile turns it on), a calendar of
     the last two weeks, her symptoms and the people. Ids and flows stay English; weekdays come
     in both languages so the assistant can resolve «el martes»."""
     local = now.astimezone(ZoneInfo(tz))
@@ -406,6 +484,24 @@ def context(
         out.append(
             f"{prefix} around {p.expected.isoformat()} "
             f"(window {p.window_start.isoformat()} .. {p.window_end.isoformat()})."
+        )
+
+    if plan:
+        out += ["", "# Calendar plan (all-day entries her calendar should have; end is exclusive)"]
+        for title, start, end in plan:
+            out.append(
+                json.dumps(
+                    {
+                        "summary": title,
+                        "start": {"date": start.isoformat()},
+                        "end": {"date": end.isoformat()},
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        out.append(
+            "Each entry from today on, written exactly as above: the same title, all-day dates, "
+            "nothing else in it and nobody invited."
         )
 
     out += ["", '# Calendar, last 14 days (use it for "ayer", "el martes"...)']

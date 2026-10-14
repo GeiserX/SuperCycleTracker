@@ -281,6 +281,7 @@ def test_the_turn_has_the_contract_shape():
             {"role": "user", "content": "Lucía: uno"},
             {"role": "user", "content": "Marta: dos"},
         ],
+        "history": [],
     }
 
 

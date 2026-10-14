@@ -25,6 +25,8 @@ MIN_RUN = 3  # a run of bleed days shorter than this is a partly logged period
 PERIOD_MAX_DAY = 7  # default `period_max_day`: the last period day the bot asks about daily
 MISSING_BACK = 3  # missing days older than this are never asked about
 KINDS = ("no_history", "quiet", "waiting", "late", "period")  # every Phase.kind
+PLAN_KINDS = ("follicular", "luteal", "period")  # the calendar plan's entries
+LUTEAL_DAYS = 14  # the textbook luteal phase: the last 14 days before the next start
 
 
 def bot_day(now: datetime, tz: tzinfo | str) -> date:
@@ -180,3 +182,47 @@ def queue(
 
 def _dates(first: date, last: date) -> list[date]:
     return [first + timedelta(days=i) for i in range((last - first).days + 1)]
+
+
+@dataclass(frozen=True)
+class PlanEntry:
+    """One all-day entry of the calendar plan: `end` is exclusive, as calendars write it."""
+
+    kind: str  # one of PLAN_KINDS
+    start: date
+    end: date
+
+
+def calendar_plan(
+    log: Mapping[date, Day],
+    today: date,
+    kinds: Collection[str] = PLAN_KINDS,
+    skipped: Collection[date] = (),
+    max_day: int = PERIOD_MAX_DAY,
+) -> tuple[PlanEntry, ...]:
+    """The predicted rest of the current cycle and the next period, as calendar entries that
+    still reach `today` or later; nothing without a prediction or once the period is late.
+
+    With `S` the last start, `P` the usual period length and `E` the expected next start: the
+    follicular phase from the end of this period (`S + P`, or the day after its last bleed day
+    when it ran longer) up to the luteal phase, the luteal phase as the last LUTEAL_DAYS - 1 days
+    before `E`, and the predicted period from `E` for `P` days. The split is the textbook one, a
+    phase name for her calendar and nothing more: no ovulation day is ever shown (DESIGN 15).
+    Kinds not in `kinds` are left out."""
+    ph = phase(log, today, skipped, max_day)
+    p = ph.prediction
+    if p is None or ph.kind == "late" or p.expected < today:
+        return ()
+    one = timedelta(days=1)
+    start, length = p.last_start, timedelta(days=p.period_days)
+    last_bleed = start
+    while (d := log.get(last_bleed + one)) is not None and d.bleed:
+        last_bleed += one
+    after_period = max(start + length, last_bleed + one)
+    luteal = p.expected - timedelta(days=LUTEAL_DAYS) + one
+    entries = (
+        PlanEntry("follicular", after_period, luteal),
+        PlanEntry("luteal", luteal, p.expected),
+        PlanEntry("period", p.expected, p.expected + length),
+    )
+    return tuple(e for e in entries if e.kind in kinds and e.start < e.end and e.end > today)
