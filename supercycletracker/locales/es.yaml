@@ -177,3 +177,18 @@ words_when:
   today: [hoy]
   yesterday: [ayer]
   day_before: [anteayer]
+
+# --- botones bajo una respuesta, y acciones que el asistente quiere hacer -----------------
+button_yes: "Sí"
+button_no: "No"
+button_approve: "Aprobar"
+button_reject: "Rechazar"
+options_hint: "O cuéntame otra cosa."
+yes_no_hint: "Toca Sí o No. Si quieres otra cosa, responde a este mensaje."
+tap_gone: "Esto ya no está esperando respuesta."
+tap_not_yours: "Esto solo lo puede responder {name}."
+ask_confirm: "{name}, ¿lo apruebas?\n{summary}"
+ask_done: "Hecho."
+ask_failed: "Falló: {error}"
+ask_failed_unknown: "No ha salido bien."
+ask_edited: "Has editado tu mensaje, así que no he hecho este cambio. No he cambiado nada."

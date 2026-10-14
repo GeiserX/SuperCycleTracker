@@ -47,13 +47,15 @@ DERIVE_PREFIX = "derive: "  # flags moved by a pull; not a check-in, so never un
 # --- SQLite kv -----------------------------------------------------------------------------
 
 KV_KEYS = frozenset({"offset", "last_ask", "migrated_chat"})
-KV_PREFIXES = ("conv:", "pending:", "skip:")
+KV_PREFIXES = ("conv:", "pending:", "skip:", "said:", "options:")
 
 
 class KV:
     """One table `kv(key, value)`. It holds exactly `offset`, `last_ask`, `conv:<chat>`,
-    `pending:<chat>`, `skip:<date>` and `migrated_chat`; any other key is refused, so nothing
-    else about the cycle can creep into a second store. Safe across threads."""
+    `pending:<chat>`, `said:<chat>` (the last answered messages, so an edit can be compared),
+    `options:<chat>` (the choices under recent answers), `skip:<date>` and `migrated_chat`; any
+    other key is refused, so nothing else about the cycle can creep into a second store. Safe
+    across threads."""
 
     def __init__(self, path: str | Path):
         path = Path(path)

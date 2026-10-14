@@ -180,3 +180,18 @@ words_when:
   today: [today]
   yesterday: [yesterday]
   day_before: [day before yesterday]
+
+# --- buttons under an answer, and actions the assistant wants to take ----------------------
+button_yes: "Yes"
+button_no: "No"
+button_approve: "Approve"
+button_reject: "Reject"
+options_hint: "Or tell me something else."
+yes_no_hint: "Tap Yes or No. If you want something else, reply to this message."
+tap_gone: "This is no longer waiting for an answer."
+tap_not_yours: "Only {name} can answer this."
+ask_confirm: "{name}, do you approve?\n{summary}"
+ask_done: "Done."
+ask_failed: "It failed: {error}"
+ask_failed_unknown: "It did not go through."
+ask_edited: "You edited your message, so I did not make this change. Nothing has changed."
