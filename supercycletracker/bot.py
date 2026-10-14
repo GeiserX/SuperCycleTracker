@@ -2366,11 +2366,12 @@ class Bot:
     def plan_rows(self, offer: Mapping) -> list:
         done = offer["items"][0].get("done")
         if done:
-            return [[("✓ " + self.t("remind_" + done), "x")]]
+            # a tap is an action, so the question's answers are Sí and No; «nada» is only no tap
+            label = {"calendar": "plan_yes", "nothing": "plan_no"}.get(done, "remind_" + done)
+            return [[("✓ " + self.t(label), "x")]]
         key = offer["key"]
         return [
-            [(self.t("remind_calendar"), f"c:{key}:y")],
-            [(self.t("remind_nothing"), f"c:{key}:n")],
+            [(self.t("plan_yes"), f"c:{key}:y"), (self.t("plan_no"), f"c:{key}:n")],
         ]
 
     def rows_of(self, offer: Mapping) -> list:
@@ -2607,7 +2608,7 @@ class Bot:
 
     def offer_plan(self, now: datetime) -> bool:
         """When the calendar plan changed since it was last offered, offer it in the group, in
-        waking hours, with «En el calendario» and «Nada». Offered once per change: nobody
+        waking hours, with «Sí» and «No». Offered once per change: nobody
         answering does nothing, and it is not offered again until the prediction moves."""
         chat = self.chat_id
         if chat is None or not self.has_assistant or not self.profile.calendar.get("events"):
@@ -2650,8 +2651,8 @@ class Bot:
         return True
 
     def tapped_plan(self, cq: Mapping, chat: int, data: str, user: object, role: str) -> None:
-        """«En el calendario» under the plan: a turn in which the assistant adds the entries,
-        each approved by this tap; «Nada»: nothing. A plan that moved since it was offered is
+        """«Sí» under the plan: a turn in which the assistant adds the entries, each approved
+        by this tap; «No»: nothing. A plan that moved since it was offered is
         not added: it is offered again."""
         _, key, choice = [*data.split(":"), "", ""][:3]
         mid = (cq.get("message") or {}).get("message_id")

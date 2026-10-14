@@ -282,7 +282,7 @@ def test_the_plan_is_offered_once_in_waking_hours(make_bot):
         "• Regla prevista: del 29 de marzo al 2 de abril\n\n"
         "Si no respondes, no hago nada."
     )
-    assert labels(post["reply_markup"]) == ["En el calendario", "Nada"]
+    assert labels(post["reply_markup"]) == ["Sí", "No"]
     assert not bot.offer_plan(bot.now())  # the same plan is not offered twice
     bot.now.advance(hours=12, minutes=1)
     bot.expire_offers()
@@ -372,7 +372,7 @@ def test_nothing_under_the_plan_does_nothing_and_strangers_cannot_tap(make_bot):
     tap(bot, no, message_id=post.get("message_id", 1))
     bot.join_idle()
     assert plugin(bot).CALLS == []
-    assert labels(markups(bot)[-1]) == ["✓ Nada"]
+    assert labels(markups(bot)[-1]) == ["✓ No"]
 
 
 # --- 5. reminders --------------------------------------------------------------------------
@@ -401,9 +401,9 @@ def test_reminders_in_an_answer_are_offered_with_buttons_and_never_shown_as_a_bl
         "jueves 4 de marzo, 23:00: Tómate el ibuprofeno\n\n"  # the past one is dropped
         "Si no respondes, no hago nada."
     )
-    assert labels(post["reply_markup"]) == ["Recordatorio aquí", "En el calendario", "Nada"]
+    assert labels(post["reply_markup"]) == ["Recordatorio aquí", "En el calendario", "No"]
     bot = make_bot(profile=ALL)  # without calendar.reminders: no calendar button
-    assert labels(offered_reminder(bot)["reply_markup"]) == ["Recordatorio aquí", "Nada"]
+    assert labels(offered_reminder(bot)["reply_markup"]) == ["Recordatorio aquí", "No"]
 
 
 def test_a_reminder_set_here_is_posted_at_its_time_once(make_bot):

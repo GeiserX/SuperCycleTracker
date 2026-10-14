@@ -388,3 +388,9 @@ def test_context_with_no_history():
     assert "No cycle start in the log yet." in text
     assert "None yet: the log has no cycle start." in text
     assert "None logged yet." in text
+
+
+def test_rules_say_a_decline_button_is_no_never_nada():
+    # Sergio, 2026-10-14: a tap is an action, so «Nada» never labels a button; the rule is the bot's own knowledge
+    text = assistant.rules("Lucía", "es", ["Marta"], "")
+    assert "never «Nada»" in text and "Sí / No" in text
