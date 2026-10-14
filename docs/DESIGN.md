@@ -337,9 +337,12 @@ mention. The rules, in both privacy settings:
   line says which of the two it came from. A failed check counts as no and the bot starts anyway.
 
 **Voice notes, step by step.** The note is queued like a text line, as `{"id", "ts", "voice":
-{"file_id", "mime"}, "who", "admin"}` in `pending:<chat>`, and the worker hears it before the turn,
-off the poll loop: `getFile`, the download from Telegram's file URL, the plugin's `transcribe`
-(section 6), then the echo «🎤 {text}» as a reply to the note, so she sees what the bot understood.
+{"file_id", "mime"}, "who", "admin", "uid"}` in `pending:<chat>`, and a hearing thread hears it at
+once, off the poll loop and beside a running turn: `getFile`, the download from Telegram's file URL,
+the plugin's `transcribe` (section 6), then the echo «🎤 {text}» as a reply to the note, so she sees
+what the bot understood. The chat's next turn waits for a note still being heard, up to 30 s from its
+arrival; a note heard later is handed to the running turn, or goes with the next one. A note a restart
+left unheard goes back to the hearing thread at start.
 The line becomes text, `Lucía: [voice note] {text}`, and goes to the assistant like a reply to the bot
 would. Once heard, the line is stored as text, so a turn that fails afterwards never transcribes the
 same note twice. A note that cannot be heard leaves the list with one line under it:
@@ -418,12 +421,47 @@ the deterministic red flag apply here exactly as for buttons.
 ### 5.2 The turn
 
 One worker thread runs assistant turns, one at a time across all chats. A text message for the bot is
-appended to the SQLite list `pending:<chat>` as `{"id", "ts", "content"}` and the chat is queued. The
-worker takes every pending line of that chat as `new`, builds the turn, calls the plugin, and on
-`kept: true` posts the text, applies the block and removes the lines it took (lines that arrived
-meanwhile stay). On an exception, a timeout or `kept: false` the app posts `ai_down` with the keyboard,
-applies no block, and leaves the lines pending so they go with the next turn. A `typing` chat action is
-sent once at the start.
+appended to the SQLite list `pending:<chat>` as `{"id", "ts", "content", "admin", "uid", "body"}` and
+the chat is queued. One answer per burst: the worker starts the turn 2.5 s after the chat's newest
+line (and waits for a voice note still being heard, 4.3), takes every pending text line of that chat
+as `new`, builds the turn, calls the plugin, and on `kept: true` posts the text, applies the block and
+removes the lines the answer covered. A line that arrives while the turn runs is handed to the plugin
+when it asks (`incoming`, section 6); the answer names the ones it covered, and the rest stay for the
+next turn. An answer that covers one message replies to it; one that covers several is sent plainly.
+On an exception, a timeout or `kept: false` the app posts `ai_down` with the keyboard, applies no
+block, and leaves every line pending, handed-over ones too, so they go with the next turn. A `typing`
+chat action is sent once at the start.
+
+**Edits.** Telegram's `edited_message` is read for her and the admins, and handled by where the
+message's line is:
+
+| the edited message is | the app |
+|---|---|
+| still queued | replaces its text and starts the 2.5 s over |
+| in the running turn | declines the turn's open asks with the note `editado: <new text>`, then queues a correction (`[Name edited a message of this turn. Reconsider your answer with the new wording.]`, `Before:`, `Now:`) that the running turn takes, or the next |
+| already answered | queues `[Name edited a message you already answered. Check whether your answer still holds with the new wording, and say what changes.]` with `Before:`, `Now:` and `Your answer was:` (its first 1,500 characters) |
+| unknown, and now addressed to the bot (a mention added) | a new message |
+
+An edit that changes no word does nothing, and one that starts with `/` never runs a command. The words
+of the last 30 answered messages and their answers stay in `said:<chat>` (none older than 7 days), so
+an edit can be compared with them.
+
+**Choices as buttons.** An answer may end with an ```` ```options ```` block, one `- label` per line
+(at most five, 40 characters each), or the plugin may return `options`. The app shows them as buttons
+under the answer, with «O cuéntame otra cosa.» under the text (for the pair Sí and No: «Toca Sí o No.
+Si quieres otra cosa, responde a este mensaje.»). Only the people the answer covered may tap, once,
+for 12 hours; a tap goes to the worker as that person's next message, with the label as its text, and
+the buttons give way to «✓ label». Nothing waits for a tap. The offers stay in `options:<chat>`.
+
+**Asks.** A plugin that defines `answer` gets `turn["ask"]`: it calls it with an action the assistant
+wants to take, and the app posts the summary with Aprobar and Rechazar, as a reply to the newest
+message the turn started with. Who may answer: the person the turn answers, when the plugin asks the
+asker and the turn carries one person's messages; else the admins. The app declines at once, with the
+note `no one could be asked`, an ask nobody may answer, one past its end and one Telegram refuses;
+one Telegram could not be reached is left for the plugin to ask again. A tap from someone else gets a
+toast. The right tap goes back through the plugin's `answer` on its own thread, the buttons give way to
+«✓ Aprobar» or «✓ Rechazar», and after an approval the chat hears «Hecho.» or «Falló: …» under the
+ask. At the turn's end, and past an ask's end, the buttons go.
 
 `pending:<chat>` is capped: the newest 10 lines, none older than 7 days; what falls off is logged as a
 count only. Without the cap a long outage would pile up lines until the plugin's prompt is refused as
@@ -598,11 +636,13 @@ def forget(conversation: str, settings: dict) -> None: ...
 # optional: a voice note's text. Raises NotImplementedError when this provider cannot
 # transcribe at all (the app answers «voice_off»); any other exception is «voice_failed».
 def transcribe(audio: bytes, mime: str, language: str, settings: dict) -> str: ...
+# optional: a person's answer to an ask (turn["ask"], below)
+def answer(request: dict, decision: dict, settings: dict) -> dict: ...
 ```
 
 `transcribe` gets the file's bytes as Telegram stored them (a voice note is `audio/ogg` Opus), the
-MIME type the message gave, and `profile.language`. It runs on the worker thread under the same wait
-and the same one-call-at-a-time rule as `converse`; text that is not a string is refused
+MIME type the message gave, and `profile.language`. It runs on the hearing thread under the same wait
+as `converse`; text that is not a string is refused
 (`bad_transcript`, which is «voice_failed»).
 
 `turn`:
@@ -618,6 +658,20 @@ and the same one-call-at-a-time rule as `converse`; text that is not a string is
 ```
 
 The language is not a field: it arrives inside `rules`, already filled.
+
+Two callables ride along, both safe to call from the plugin's own thread while `converse` runs:
+
+- `incoming()` returns the chat's text lines that arrived since the turn started and were not handed
+  over yet, as `[{"id", "role": "user", "content", "ts"}]` (`ts` ISO 8601 UTC); an edit of a message of
+  the turn arrives as a correction in the same shape. Once the turn is over it returns `[]`. The return
+  value names the ones the answer took in, `"covers": [ids]`; every handed-over line it does not name
+  goes with the next turn. A plugin that never calls it covers nothing extra.
+- `ask(request)`, only when the plugin defines `answer`: `request` is `{"id": str, "summary": str,
+  "confirm_by": "asker" | "admins", "expires_at": epoch seconds}`, an action the assistant wants to
+  take. It returns `True` once the ask is settled (posted, or declined at once through `answer` with
+  `approved: false` and a note) and `False` when Telegram could not be reached: the plugin asks again
+  later. On a tap the app calls `answer(request, {"approved": bool, "by": "<user id>", "note": str |
+  None}, settings)`, which returns `{"ok": bool | None, "error": str | None}`.
 
 `new` holds every message the plugin has not kept yet, oldest first; it never contains the bot's own
 answers. There is no history or recap field: the log plus the context is the memory, so a provider
@@ -635,6 +689,9 @@ Return value, either a bare string (no conversation kept) or:
 ```
 
 - The app stores `conversation` per chat (SQLite key `conv:<chat>`); `null` starts over next time.
+- `covers` (optional): the ids of handed-over lines the answer took in (see `incoming` above).
+- `options` (optional): choices to show as buttons under the answer, instead of an ```` ```options ````
+  block in `text`.
 - `kept: false` means the provider did not store the turn. The app treats it as a failed turn: it
   posts `ai_down`, applies no block from `text`, and sends the same `new` lines again with the next
   turn. A plugin that has a usable answer returns `kept: true` with it.
@@ -781,7 +838,8 @@ with the same `{placeholders}`; every Spanish string containing `?` also contain
 - `telegram.py` is a stdlib `urllib` client: `call(method, **params)`, 429 honoured up to twice
   (`retry_after`, capped at 60 s), errors reported as `TelegramError(method, code, description)` whose
   text never contains the URL (the token is in it). `safe(e)` strips the token from any exception.
-- The main loop: `getUpdates(timeout=20, allowed_updates=["message", "callback_query"])`, handle
+- The main loop: `getUpdates(timeout=20, allowed_updates=["message", "edited_message",
+  "callback_query"])`, handle
   each update (callbacks answered inline; free text appended to `pending` and the chat queued for the
   worker), then `tick(now)`: the scheduled ask, `repo.flush()`, and a touch of `/tmp/sct.alive` for the
   container healthcheck.

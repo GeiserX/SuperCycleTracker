@@ -8,9 +8,13 @@ The app loads it from the data directory like any plugin. A test reaches the loa
   returns one of those. With the list empty the plugin answers «Vale.» and keeps the turn.
 - `DOWN`: while true every call raises, as a provider that is down.
 - `CALLS`: every turn and settings received; `FORGOTTEN`: every conversation dropped.
-- `VOICES`: what the next `transcribe` calls return, in order (a string, or an exception that is
-  raised). With the list empty `transcribe` raises `NotImplementedError`, as a provider that cannot
-  listen. `HEARD`: every `(audio, mime, language)` received.
+- `VOICES`: what the next `transcribe` calls return, in order (a string, an exception that is
+  raised, or a callable that returns one of those). With the list empty `transcribe` raises
+  `NotImplementedError`, as a provider that cannot listen. `HEARD`: every `(audio, mime, language)`
+  received.
+- `ANSWERS`: what the next `answer` calls return (with the list empty, `{"ok": True}`);
+  `ANSWERED`: every `(request, decision)` received. A reply callable reaches `turn["incoming"]`
+  and `turn["ask"]` through the turn it gets.
 
 A reply dict may carry `later`, a callable with no arguments that returns a string: the app runs
 it after posting the text.
@@ -23,6 +27,8 @@ CALLS: list = []
 FORGOTTEN: list = []
 VOICES: list = []
 HEARD: list = []
+ANSWERS: list = []
+ANSWERED: list = []
 DOWN = False
 
 
@@ -51,6 +57,13 @@ def transcribe(audio, mime, language, settings):
     if not VOICES:
         raise NotImplementedError
     out = VOICES.pop(0)
+    if not isinstance(out, BaseException) and callable(out):
+        out = out()
     if isinstance(out, BaseException):
         raise out
     return out
+
+
+def answer(request, decision, settings):
+    ANSWERED.append((dict(request), dict(decision)))
+    return ANSWERS.pop(0) if ANSWERS else {"ok": True, "error": None}

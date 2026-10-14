@@ -5,10 +5,12 @@ import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from supercycletracker import records
+from supercycletracker.bot import Bot
 from supercycletracker.records import Day
 from supercycletracker.telegram import TelegramError
 
@@ -176,3 +178,57 @@ class Clock:
 
     def advance(self, **kw) -> None:
         self.at += timedelta(**kw)
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+MADRID = ZoneInfo("Europe/Madrid")
+GROUP, HER, ADMIN, STRANGER, BOT_ID = -100123, 111, 222, 333, 999
+
+PROFILE = """\
+name: Lucía
+birth_date: 1993-05-02
+timezone: Europe/Madrid
+language: es
+ask_at: "21:00"
+telegram:
+  chat_id: -100123
+  user_id: 111
+  username: lucia_example
+  admins: {222: Marta}
+assistant:
+  plugin: plugins/fake.py
+  timeout_s: 5
+  model: null
+  instructions: ""
+"""
+
+
+def at(day: date, hour: int = 21, minute: int = 0) -> datetime:
+    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=MADRID)
+
+
+@pytest.fixture
+def make_bot(data_repo):
+    """A bot on the fictional seed log (periods from 2027-01-04, 02-01 and 03-01, the last one
+    with three bleed days and no closing day), at 21:00 on `today`."""
+    bots = []
+
+    def make(today=date(2027, 3, 4), profile=PROFILE, log=None, read_all=False, member=None):
+        (data_repo.data / "cycle" / "profile.yaml").write_text(profile, encoding="utf-8")
+        (data_repo.data / "plugins").mkdir(exist_ok=True)
+        shutil.copy(FIXTURES / "fake_plugin.py", data_repo.data / "plugins" / "fake.py")
+        if log is not None:
+            records.save(data_repo.log, records.derive_starts(log))
+        tg = FakeTelegram()
+        tg.me["can_read_all_group_messages"] = read_all
+        if member is not None:
+            tg.member = member
+        bot = Bot(data_repo.data, tg, now=Clock(at(today)))
+        bot.debounce_s = 0  # a test's burst is sent on purpose; see the debounce tests
+        bot.start()
+        bots.append(bot)
+        return bot
+
+    yield make
+    for bot in bots:
+        bot.close()

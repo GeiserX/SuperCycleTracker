@@ -21,6 +21,7 @@ SuperCycleTracker is a menstrual cycle tracker that lives in a Telegram group. I
 - Imports an Apple Health export to seed the history.
 - In the group it reads replies to the bot, answers to its questions, commands, and messages that mention it when Telegram delivers them; as a group admin it reads all of her messages. Voice notes from her or an admin are always heard, when the plugin can transcribe. It also answers private chats with her or an admin.
 - Works without any AI: buttons and `/anotar` write records directly. An optional assistant plugin reads free text and answers questions.
+- A burst of messages gets one answer, and what she writes while it thinks joins that answer. An edited message is taken into account. Choices come as buttons she can tap or ignore, and an action the assistant wants to take waits for Approve or Reject.
 - Every string is translatable. English and Spanish ship.
 - Keeps the records in a private git repository you own, one commit per check-in, with `/deshacer` as undo.
 
@@ -112,9 +113,13 @@ def converse(turn: dict, settings: dict) -> dict | str: ...  # required
 def forget(conversation: str, settings: dict) -> None: ...  # optional, called by /nuevo
 # optional, the text of a voice note
 def transcribe(audio: bytes, mime: str, language: str, settings: dict) -> str: ...
+# optional, a person's answer to an action the assistant asked to take
+def answer(request: dict, decision: dict, settings: dict) -> dict: ...
 ```
 
 `turn` has `conversation` (what the plugin returned last time in this chat, or `None`), `rules`, `context`, `files` (`{"cycle/log.jsonl": <whole file>}`) and `new` (her lines the plugin has not kept yet). `settings` is the `assistant:` block minus `plugin` and `instructions`. Return a string, or `{"text", "conversation", "kept", "later"}`; `later` is an optional callable the app runs on a background thread after posting the text, posting the string it returns. The text may end with one fenced `record` block, and one `settings` block when she asks to change the ask hour. The app validates each, all or nothing, and writes the confirmation itself from what it saved. `kept: false` counts as a failed turn: nothing is applied and her lines go again with the next one. The plugin must return before `timeout_s`.
+
+While it works, the plugin may call `turn["incoming"]()` for the messages that arrived since the turn started and name the ones its answer covered in `covers`; the rest go with the next turn. It may offer choices as buttons (`options`, or an `options` block in the text). A plugin that defines `answer` also gets `turn["ask"]`, which posts an action the assistant wants to take with Approve and Reject and calls `answer` on the tap.
 
 [`tests/fixtures/fake_plugin.py`](tests/fixtures/fake_plugin.py) is a scripted example. The full design is in [`docs/DESIGN.md`](docs/DESIGN.md).
 

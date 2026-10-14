@@ -6,6 +6,11 @@ log and her new lines, and takes back text that may end with one fenced `record`
 `settings` block). The app, not the assistant, validates and applies those blocks. A plugin may also turn a voice note into text
 (`transcribe`) and hand back slow work to finish after its answer is posted (`later`).
 
+While a turn runs, the plugin may take the messages that arrived since it started
+(`turn["incoming"]()`) and name in its answer the ones it covered (`covers`); the rest go with the
+next turn. It may offer choices as buttons under its answer (`options`), and, when it defines
+`answer`, ask a person to approve an action it wants to take (`turn["ask"]`).
+
 Nothing here logs: errors are `PluginError` reason codes, and a plugin's own exception goes up to
 the caller, which logs its class only (`telegram.safe`).
 """
@@ -43,6 +48,8 @@ BLOCK_KINDS = ("record", "settings")  # the fenced blocks an answer may end with
 _BLOCK = {k: re.compile(rf"```{k}[^\S\n]*\n(.*?)```", re.DOTALL) for k in BLOCK_KINDS}
 _UNCLOSED = {k: re.compile(rf"```{k}\b.*\Z", re.DOTALL) for k in BLOCK_KINDS}
 BAD_BLOCK = object()  # `extract` found a block whose JSON does not parse
+OPTIONS_MAX, OPTION_CHARS = 5, 40  # choices offered as buttons under an answer
+_OPTIONS = re.compile(r"\n?```options[^\S\n]*\n(.*?)```[^\S\n]*", re.DOTALL)
 
 
 class PluginError(Exception):
@@ -128,37 +135,73 @@ class Reply:
     conversation: str | None = None
     kept: bool = True
     later: Callable[[], str] | None = None  # slow work the app runs after posting `text`
+    covers: frozenset = frozenset()  # ids of handed-over messages the answer took in
+    options: tuple[str, ...] = ()  # choices to offer as buttons under the answer
 
 
 def reply(out: object) -> Reply:
-    """A plugin's return value: a bare string, or `{"text", "conversation", "kept", "later"}`."""
+    """A plugin's return value: a bare string, or `{"text", "conversation", "kept", "later",
+    "covers", "options"}`."""
     if isinstance(out, str):
         return Reply(out)
     if isinstance(out, Mapping):
         text, conversation, kept = out.get("text"), out.get("conversation"), out.get("kept", True)
-        later = out.get("later")
+        later, covers = out.get("later"), out.get("covers")
         if not isinstance(text, str) or not isinstance(kept, bool):
             raise PluginError("bad_reply")
         if conversation is not None and not isinstance(conversation, str):
             raise PluginError("bad_reply")
         if later is not None and not callable(later):
             raise PluginError("bad_reply")
-        return Reply(text, conversation or None, kept, later)
+        ids = (
+            frozenset(
+                i for i in covers or () if isinstance(i, int | str) and not isinstance(i, bool)
+            )
+            if isinstance(covers, list | tuple)
+            else frozenset()
+        )
+        return Reply(text, conversation or None, kept, later, ids, options(out.get("options")))
     raise PluginError("bad_reply")
 
 
-_ABANDONED: dict[str, threading.Thread] = {}  # per plugin path: a call that outlived its wait
+def options(raw: object) -> tuple[str, ...]:
+    """Well-formed choices: short, distinct, at most OPTIONS_MAX; anything else is dropped."""
+    out: list[str] = []
+    for o in raw if isinstance(raw, list | tuple) else ():
+        label = " ".join(o.split()) if isinstance(o, str) else ""
+        if label and len(label) <= OPTION_CHARS and label not in out:
+            out.append(label)
+    return tuple(out[:OPTIONS_MAX])
+
+
+def extract_options(text: str) -> tuple[str, tuple[str, ...]]:
+    """The answer without its ```options block, and the choices the last block lists, one
+    `- label` per line."""
+    blocks = list(_OPTIONS.finditer(text))
+    if not blocks:
+        return text, ()
+    lines = [x.strip() for x in blocks[-1].group(1).splitlines()]
+    labels = [x[1:].strip() for x in lines if x.startswith(("-", "*"))]
+    clean = re.sub(r"\n{3,}", "\n\n", _OPTIONS.sub("", text)).strip()
+    return clean, options(labels)
+
+
+# per plugin path and function: a call that outlived its wait
+_ABANDONED: dict[str, threading.Thread] = {}
 
 
 def _call(data: str | Path, rel: str | None, fn: Callable, args: tuple, plugin_settings: dict):
     """Run a plugin function in its own daemon thread and wait at most `timeout_s`.
 
     The app cannot stop a plugin: a call that outlives the wait is abandoned and counts as
-    failed (`PluginError("timeout")`). Until that call returns, the plugin is not called again
-    (`PluginError("plugin_busy")`), so it never runs two calls at once. The plugin's own
-    exception is raised as it is; an exit that is not an `Exception` (`SystemExit`,
-    `KeyboardInterrupt`) becomes `PluginError("plugin_aborted")`."""
-    key = str((Path(data) / str(rel)).resolve())
+    failed (`PluginError("timeout")`). Until that call returns, the same function is not called
+    again (`PluginError("plugin_busy")`), so a turn never starts beside an abandoned turn. The
+    functions themselves may run at once: a note is heard and an ask answered while a turn
+    runs, so one abandoned function never blocks another, and a call that ends clears only a
+    marker whose thread has ended too. The plugin's own exception is raised as it is; an exit
+    that is not an `Exception` (`SystemExit`, `KeyboardInterrupt`) becomes
+    `PluginError("plugin_aborted")`."""
+    key = f"{(Path(data) / str(rel)).resolve()}:{getattr(fn, '__name__', '?')}"
     previous = _ABANDONED.get(key)
     if previous is not None and previous.is_alive():
         raise PluginError("plugin_busy")
@@ -176,7 +219,9 @@ def _call(data: str | Path, rel: str | None, fn: Callable, args: tuple, plugin_s
     if thread.is_alive():
         _ABANDONED[key] = thread
         raise PluginError("timeout")
-    _ABANDONED.pop(key, None)
+    stale = _ABANDONED.get(key)
+    if stale is not None and not stale.is_alive():
+        _ABANDONED.pop(key, None)
     error = box.get("error")
     if error is not None:
         if not isinstance(error, Exception):  # SystemExit and the like must not end the worker
@@ -208,6 +253,30 @@ def transcribe(
     if not isinstance(out, str):
         raise PluginError("bad_transcript")
     return out
+
+
+def asks(data: str | Path, rel: str | None) -> bool:
+    """Whether the plugin may ask a person to approve an action while it works (it defines
+    `answer`). A plugin that cannot be loaded asks nothing."""
+    try:
+        return function(data, rel, "answer", required=False) is not None
+    except PluginError:
+        return False
+
+
+def answer(
+    data: str | Path, rel: str | None, request: dict, decision: dict, plugin_settings: dict
+) -> dict:
+    """A person's answer to an ask, back to the plugin's `answer`, with the same wait as a turn:
+    `{"ok": bool | None, "error": str | None}`."""
+    fn = function(data, rel, "answer")
+    out = _call(data, rel, fn, (request, decision), plugin_settings)
+    out = out if isinstance(out, Mapping) else {}
+    ok, error = out.get("ok"), out.get("error")
+    return {
+        "ok": ok if isinstance(ok, bool) else None,
+        "error": error if isinstance(error, str) else None,
+    }
 
 
 def forget(data: str | Path, rel: str | None, conversation: str, plugin_settings: dict) -> None:

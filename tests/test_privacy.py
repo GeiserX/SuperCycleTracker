@@ -89,7 +89,7 @@ def reply(bot, text):
             }
         }
     )
-    bot.worker.join_idle()
+    bot.join_idle()
 
 
 def command(bot, text, user=HER):
@@ -151,7 +151,7 @@ def scripted_flow(bot):
             }
         }
     )
-    bot.worker.join_idle()
+    bot.join_idle()
     bot.later.join_idle()
     command(bot, "/anotar ayer poquito 3 hinchazón")
     command(bot, "/resumen")
@@ -190,9 +190,9 @@ def test_the_service_log_holds_no_words_dates_values_or_names(
     if planted:  # the positive control: one careless line must turn the test red
         original = Bot.queue_text
 
-        def leaky(self, chat, msg, content, role):
+        def leaky(self, chat, msg, content, role, *rest):
             bot_module.log.info("queued %s", content)
-            return original(self, chat, msg, content, role)
+            return original(self, chat, msg, content, role, *rest)
 
         monkeypatch.setattr(Bot, "queue_text", leaky)
     caplog.set_level(logging.DEBUG)
@@ -201,6 +201,7 @@ def test_the_service_log_holds_no_words_dates_values_or_names(
         FakeTelegram(),
         now=Clock(datetime(2027, 3, 27, 21, 0, tzinfo=ZoneInfo("Europe/Madrid"))),
     )
+    bot.debounce_s = 0
     try:
         bot.start()
         scripted_flow(bot)

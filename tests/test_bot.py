@@ -1,12 +1,20 @@
 import logging
-import shutil
 import threading
-from datetime import date, datetime, timedelta
-from pathlib import Path
-from zoneinfo import ZoneInfo
+from datetime import date, timedelta
 
 import pytest
-from conftest import Clock, FakeTelegram, git, seed_log
+from conftest import (
+    ADMIN,
+    BOT_ID,
+    FIXTURES,
+    GROUP,
+    HER,
+    PROFILE,
+    STRANGER,
+    at,
+    git,
+    seed_log,
+)
 
 from supercycletracker import assistant, cycle, records
 from supercycletracker.bot import (
@@ -22,58 +30,6 @@ from supercycletracker.bot import (
 from supercycletracker.i18n import Translator
 from supercycletracker.records import Day
 from supercycletracker.telegram import TelegramError
-
-FIXTURES = Path(__file__).parent / "fixtures"
-MADRID = ZoneInfo("Europe/Madrid")
-GROUP, HER, ADMIN, STRANGER, BOT_ID = -100123, 111, 222, 333, 999
-
-PROFILE = """\
-name: Lucía
-birth_date: 1993-05-02
-timezone: Europe/Madrid
-language: es
-ask_at: "21:00"
-telegram:
-  chat_id: -100123
-  user_id: 111
-  username: lucia_example
-  admins: {222: Marta}
-assistant:
-  plugin: plugins/fake.py
-  timeout_s: 5
-  model: null
-  instructions: ""
-"""
-
-
-def at(day: date, hour: int = 21, minute: int = 0) -> datetime:
-    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=MADRID)
-
-
-@pytest.fixture
-def make_bot(data_repo):
-    """A bot on the fictional seed log (periods from 2027-01-04, 02-01 and 03-01, the last one
-    with three bleed days and no closing day), at 21:00 on `today`."""
-    bots = []
-
-    def make(today=date(2027, 3, 4), profile=PROFILE, log=None, read_all=False, member=None):
-        (data_repo.data / "cycle" / "profile.yaml").write_text(profile, encoding="utf-8")
-        (data_repo.data / "plugins").mkdir(exist_ok=True)
-        shutil.copy(FIXTURES / "fake_plugin.py", data_repo.data / "plugins" / "fake.py")
-        if log is not None:
-            records.save(data_repo.log, records.derive_starts(log))
-        tg = FakeTelegram()
-        tg.me["can_read_all_group_messages"] = read_all
-        if member is not None:
-            tg.member = member
-        bot = Bot(data_repo.data, tg, now=Clock(at(today)))
-        bot.start()
-        bots.append(bot)
-        return bot
-
-    yield make
-    for bot in bots:
-        bot.close()
 
 
 def plugin(bot):
@@ -115,7 +71,7 @@ def say(
     if entities:
         message["entities"] = entities
     bot.handle({"update_id": 2, "message": message})
-    bot.worker.join_idle()
+    bot.join_idle()
     return message
 
 
@@ -550,7 +506,8 @@ def test_a_reply_triggers_a_turn_with_the_contract_shape(make_bot):
     calls = plugin(bot).CALLS
     assert len(calls) == 1
     turn = calls[0]["turn"]
-    assert set(turn) == {"conversation", "rules", "context", "files", "new"}
+    assert set(turn) == {"conversation", "rules", "context", "files", "new", "incoming", "ask"}
+    assert callable(turn["incoming"]) and callable(turn["ask"])
     assert turn["conversation"] is None
     assert turn["new"] == [
         {
@@ -777,7 +734,7 @@ def test_after_a_timeout_the_plugin_is_not_called_again_until_it_returns(make_bo
         ) == 2
     finally:
         release.set()
-    abandoned = assistant._ABANDONED[str((bot.data / "plugins" / "fake.py").resolve())]
+    abandoned = assistant._ABANDONED[f"{(bot.data / 'plugins' / 'fake.py').resolve()}:converse"]
     abandoned.join(5)
     mod.REPLIES[:] = []
     say(bot, "tres", reply_to=QUESTION)
@@ -867,7 +824,7 @@ def test_a_message_arriving_mid_turn_is_not_dropped(make_bot):
         }
     )
     release.set()
-    bot.worker.join_idle()
+    bot.join_idle()
     assert [c["turn"]["new"][0]["content"] for c in mod.CALLS] == [
         "Lucía: [replying to the bot: x] uno",
         "Lucía: [replying to the bot: x] dos",
@@ -1264,7 +1221,7 @@ def test_nuevo_during_a_turn_is_not_undone_when_the_turn_ends(make_bot):
     bot.handle({"message": {**nuevo, "chat": {"id": GROUP, "type": "supergroup"}}})
     assert bot.kv.get(f"conv:{GROUP}") is None
     release.set()
-    bot.worker.join_idle()
+    bot.join_idle()
     assert mod.FORGOTTEN == ["conv-1"]
     assert bot.kv.get(f"conv:{GROUP}") is None
     say(bot, "dos", reply_to=QUESTION)
@@ -1339,7 +1296,11 @@ def test_poll_handles_updates_and_keeps_the_offset(make_bot):
     assert bot.kv.get("offset") == "43"
     assert bot.poll_once() == 0
     assert bot.tg.of("getUpdates")[-1]["offset"] == 43
-    assert bot.tg.of("getUpdates")[-1]["allowed_updates"] == ["message", "callback_query"]
+    assert bot.tg.of("getUpdates")[-1]["allowed_updates"] == [
+        "message",
+        "edited_message",
+        "callback_query",
+    ]
 
 
 def test_poll_waits_on_409_and_429_and_backs_off_on_5xx(make_bot):
@@ -1408,7 +1369,7 @@ def voice(bot, user=HER, chat=GROUP, file_id="v1", private=False, kind="voice", 
         kind: {"file_id": file_id, "duration": 4, **media},
     }
     bot.handle({"update_id": 3, "message": message})
-    bot.worker.join_idle()
+    bot.join_idle()
     return message
 
 
@@ -1559,7 +1520,7 @@ def test_the_echo_is_escaped_and_cut(make_bot):
 
 
 def drain(bot):
-    bot.worker.join_idle()
+    bot.join_idle()
     bot.later.join_idle()
 
 

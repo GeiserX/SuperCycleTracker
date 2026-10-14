@@ -4,8 +4,17 @@ A tap is recorded at once, with no AI: each button carries its date and value, a
 computed from the log, never from a session table, so a stale keyboard still works and a restart
 mid-card loses nothing. Text meant for the bot is queued in SQLite (`pending:<chat>`) and one worker
 thread runs assistant turns, one at a time, so a tap is answered while the assistant thinks. A voice
-note from her or an admin is queued the same way and turned into text by the plugin on that thread.
-Slow work a plugin hands back with its answer (`later`) runs on a second thread, one job at a time.
+note from her or an admin is queued the same way and turned into text by the plugin on a hearing
+thread. Slow work a plugin hands back with its answer (`later`) runs on a third thread, one job at a
+time, and a person's answer to an action the assistant wants to take goes back on a fourth.
+
+One answer per burst: a turn starts DEBOUNCE_S after the chat's newest message, and waits up to
+VOICE_WAIT_S for a voice note of that chat still being heard. What arrives while the turn runs is
+handed to the plugin (`turn["incoming"]`); the answer names what it covered, and the rest goes with
+the next turn. An answer that covers one message replies to it; one that covers several is sent
+plainly. An edited message is handled by where it is: still queued, its new wording goes; in the
+running turn, a correction joins it; already answered, a new turn checks that answer; an edit that
+now addresses the bot is a new message.
 
 The service log gets event kinds and counts only: never a message text, a date of a record or a
 value.
@@ -16,6 +25,7 @@ from __future__ import annotations
 import html
 import logging
 import re
+import secrets
 import threading
 import time
 import unicodedata
@@ -75,6 +85,14 @@ WAIT_409_S = 30  # another poller holds the token: wait and keep the offset
 TICK_S = 60  # a long wait ticks at least this often: the healthcheck allows 180 s
 BACKOFF_MIN_S, BACKOFF_MAX_S = 5, 300  # 5xx and network failures
 MENU = ("hoy", "resumen", "anotar", "hora", "deshacer", "ayuda")  # the commands in the menu
+DEBOUNCE_S = 2.5  # a chat's turn starts this long after its newest message: a burst goes together
+VOICE_WAIT_S = 30  # and waits this long at most, from a note's arrival, for a note being heard
+SAID_MAX = 30  # answered messages kept per chat, so an edit of one can be compared with it
+ANSWER_CLIP = 1500  # characters of the earlier answer that an edit of an answered message carries
+OPTIONS_TTL_S = 12 * 3600  # a choice under an answer can be tapped this long
+OPTIONS_KEEP = 20  # offers kept per chat
+ASK_DEFAULT_S = 300  # an ask that names no end of its own waits this long
+NO_ONE = "no one could be asked"  # the note of an ask declined because nobody could answer it
 SETTINGS_KEYS = ("ask_at", "period_max_day")  # what a `settings` block or /hora may change
 
 _COMMAND = re.compile(r"^/([A-Za-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s+(.*))?$", re.DOTALL)
@@ -287,6 +305,10 @@ class Worker:
                     self._busy = False
                     self._cond.notify_all()
 
+    def idle(self) -> bool:
+        with self._cond:
+            return not self._queue and not self._busy
+
     def join_idle(self, timeout: float = 10.0) -> None:
         """Wait until nothing is queued or running (tests drain the worker with this)."""
         deadline = time.monotonic() + timeout
@@ -344,6 +366,39 @@ class Closed:
     end: date
     closing: date | None
     prediction: cycle.Prediction | None
+
+
+@dataclass
+class Turn:
+    """One assistant turn running for a chat: the lines it started with, the lines handed to it
+    while it ran, who wrote them, and the asks it posted."""
+
+    chat: int
+    ids: list
+    users: list[int]
+    mid: int | None  # the message an ask replies to: the newest the turn started with
+    pulled: list = field(default_factory=list)
+    asks: list[str] = field(default_factory=list)
+    edited: dict = field(default_factory=dict)  # message id -> its newest wording
+    closed: bool = False
+
+    def has(self, line_id: object) -> bool:
+        return line_id in self.ids or line_id in self.pulled
+
+
+def _mid(line: Mapping) -> int | None:
+    """The Telegram message a pending line answers to (lines from 0.2 carry only `id`)."""
+    if "mid" in line:
+        return line["mid"]
+    return line["id"] if isinstance(line.get("id"), int) else None
+
+
+def _users(lines: Sequence[Mapping]) -> list[int]:
+    return list(dict.fromkeys(x["uid"] for x in lines if x.get("uid")))
+
+
+def _words(text: str) -> str:
+    return " ".join(str(text or "").split())
 
 
 def _key(d: date) -> str:
@@ -422,6 +477,19 @@ class Bot:
         # a plugin's slow work (`later`): one job at a time across every chat, in order; a
         # restart loses what is queued or running
         self.later = Worker(lambda job: job(), name="sct-later")
+        # One answer per burst. `_q` guards what the poll loop, the worker, the hearing thread and
+        # the plugin's thread share: when each chat's newest line came, the notes still being
+        # heard, the turn running per chat and the plugin's open asks. Taking the KV lock while
+        # holding `_q` is fine; the other way round never happens.
+        self.debounce_s, self.voice_wait_s = DEBOUNCE_S, VOICE_WAIT_S
+        self.clock, self.sleep = time.monotonic, time.sleep
+        self._q = threading.Lock()
+        self._newest: dict[int, float] = {}
+        self._voicing: dict[int, dict] = {}  # chat -> {line id: when the note arrived}
+        self._running: dict[int, Turn] = {}
+        self.asks: dict[str, dict] = {}  # the plugin's open asks, by the key on their buttons
+        self.hearer = Worker(self._hear_chat, name="sct-hear")
+        self.side = Worker(lambda job: job(), name="sct-asks")  # answers to asks, off the poll loop
 
     def start(self) -> None:
         """`getMe`, then `getChatMember` for the bot in the group: Telegram delivers every group
@@ -465,9 +533,20 @@ class Bot:
             log.warning("setMyCommands failed: %s", safe(e))
 
     def close(self) -> None:
+        self.hearer.stop()
         self.worker.stop()
         self.later.stop()
+        self.side.stop()
         self.kv.close()
+
+    def join_idle(self, timeout: float = 10.0) -> None:
+        """Wait until no note is being heard, no turn runs and no answer to an ask is on its way
+        (tests drain the bot with this)."""
+        deadline = time.monotonic() + timeout
+        workers = (self.hearer, self.worker, self.side)
+        while not all(w.idle() for w in workers):
+            for w in workers:
+                w.join_idle(max(0.01, deadline - time.monotonic()))
 
     # --- small helpers -----------------------------------------------------------------
 
@@ -729,6 +808,8 @@ class Bot:
             self.on_callback(update["callback_query"])
         elif "message" in update:
             self.on_message(update["message"])
+        elif "edited_message" in update:
+            self.on_edit(update["edited_message"])
 
     def on_callback(self, cq: Mapping) -> None:
         t = self.t
@@ -739,6 +820,15 @@ class Bot:
         if role is None:
             self.answer(cq["id"], t("only_her", name=self.profile.name))
             log.info("callback refused: not_allowed")
+            return
+        data = cq.get("data")
+        if isinstance(data, str) and data.startswith(("a:", "o:")):
+            if chat is None:
+                self.answer(cq["id"])
+            elif data.startswith("a:"):
+                self.tapped_ask(cq, chat, data, user)
+            else:
+                self.tapped_option(cq, chat, data, user, role)
             return
         try:
             kind, d, value = parse_callback(cq.get("data"))
@@ -1057,7 +1147,7 @@ class Bot:
             return
         content = self.addressed(msg, text, private, role)
         if content is not None:
-            self.queue_text(chat["id"], msg, content, role)
+            self.queue_text(chat["id"], msg, content, role, self._strip_mention(msg, text)[0])
 
     def addressed(self, msg: Mapping, text: str, private: bool, role: str) -> str | None:
         """The line for the assistant when the message is meant for the bot, else None.
@@ -1129,25 +1219,37 @@ class Bot:
             "voice": voice,
             "who": self.who(role, user),
             "admin": role == ADMIN,
+            "uid": user,
         }
         self.queue_line(chat["id"], line)
         log.info("voice queued")
 
-    def queue_text(self, chat: int, msg: Mapping, content: str, role: str) -> None:
-        """Append a line to `pending:<chat>` and queue the chat for the worker. Without an
-        assistant: «no_ai» with today's keyboard."""
+    def queue_text(
+        self, chat: int, msg: Mapping, content: str, role: str, body: str | None = None
+    ) -> None:
+        """Append a line to `pending:<chat>` and queue the chat for the worker. `body` is the
+        message's own words, kept so an edit can be compared with them. Without an assistant:
+        «no_ai» with today's keyboard."""
         if not self.has_assistant:
             self.post(chat, self.t("no_ai"), self.today_keyboard())
             log.info("text without assistant")
             return
         now = int(self.now().timestamp())
-        line = {"id": msg.get("message_id"), "ts": now, "content": content, "admin": role == ADMIN}
+        line = {
+            "id": msg.get("message_id"),
+            "ts": now,
+            "content": content,
+            "admin": role == ADMIN,
+            "uid": (msg.get("from") or {}).get("id"),
+        }
+        if body is not None:
+            line["body"] = body.strip()
         self.queue_line(chat, line)
         log.info("text queued")
 
     def queue_line(self, chat: int, line: dict) -> None:
         """Append `line` to `pending:<chat>` (the newest 10, none older than 7 days) and queue
-        the chat for the worker."""
+        the chat: a voice note for the hearing thread, text for the worker."""
         now = int(self.now().timestamp())
         dropped = []
 
@@ -1161,14 +1263,21 @@ class Bot:
         self.kv.update_json(f"pending:{chat}", add, [])
         if dropped and dropped[0]:
             log.info("pending capped dropped=%d", dropped[0])
-        self.worker.submit(chat)
+        with self._q:
+            self._newest[chat] = self.clock()
+            if "voice" in line:
+                self._voicing.setdefault(chat, {})[line["id"]] = self.clock()
+        if "voice" in line:
+            self.hearer.submit(chat)
+        else:
+            self.worker.submit(chat)
 
     def cmd_hoy(self, msg: Mapping, rest: str, role: str) -> None:
         """/hoy: today's card; with text after it, the text goes to the assistant."""
         chat = msg["chat"]["id"]
         if rest:
             user = (msg.get("from") or {}).get("id")
-            self.queue_text(chat, msg, f"{self.who(role, user)}: {rest}", role)
+            self.queue_text(chat, msg, f"{self.who(role, user)}: {rest}", role, rest)
         else:
             self.send_card(chat, self.today())
 
@@ -1293,6 +1402,8 @@ class Bot:
             conversation = self.kv.get(f"conv:{chat}")
             self.kv.delete(f"conv:{chat}")
         self.kv.delete(f"pending:{chat}")
+        self.kv.delete(f"said:{chat}")
+        self.kv.delete(f"options:{chat}")
         if conversation and self.has_assistant:
             block = self.profile.assistant or {}
             try:
@@ -1378,6 +1489,10 @@ class Bot:
         if self.repo.profile_pulled:
             self.repo.profile_pulled = False
             self.reload_profile()
+        try:
+            self.expire_asks()
+        except Exception as e:  # noqa: BLE001
+            log.warning("ask expiry failed: %s", safe(e))
         self.heartbeat()
 
     def heartbeat(self) -> None:
@@ -1408,7 +1523,7 @@ class Bot:
                 "getUpdates",
                 offset=int(offset) if offset else None,
                 timeout=POLL_S,
-                allowed_updates=["message", "callback_query"],
+                allowed_updates=["message", "edited_message", "callback_query"],
             )
         except TelegramError as e:
             log.warning("getUpdates failed: %s", safe(e))
@@ -1448,6 +1563,7 @@ class Bot:
                 delay = min(delay * 2, BACKOFF_MAX_S)
         self.repo.check_remote()
         self.set_commands()
+        self.resume_notes()
         try:
             while not stop.is_set():
                 try:
@@ -1463,16 +1579,44 @@ class Bot:
 
     # --- the assistant turn (worker thread) ----------------------------------------------
 
+    def settle(self, chat: int) -> None:
+        """Wait until the chat's newest line is `debounce_s` old and no voice note of it is still
+        being heard, for `voice_wait_s` at most from that note's arrival."""
+        while True:
+            with self._q:
+                newest = self._newest.get(chat)
+                notes = list((self._voicing.get(chat) or {}).values())
+            now = self.clock()
+            wait = newest + self.debounce_s - now if newest is not None else 0.0
+            if notes:
+                wait = max(wait, min(notes) + self.voice_wait_s - now)
+            if wait <= 0:
+                return
+            self.sleep(min(wait, 0.5))
+
     def _turn(self, chat: int) -> None:
-        """One turn: every pending line of the chat goes as `new`. On success the text is
-        posted, the block applied and the lines taken removed (lines that arrived meanwhile
-        stay). On an exception, a timeout or `kept: false`: «ai_down» with the keyboard, no
-        block, and the lines stay for the next turn."""
+        """One turn: after the debounce, every pending text line of the chat goes as `new`, and
+        what arrives while it runs is handed over through `incoming`. On success the text is
+        posted, the block applied and the lines it covered removed (the rest stay for the next
+        turn). On an exception, a timeout or `kept: false`: «ai_down» with the keyboard, no
+        block, and every line stays for the next turn."""
         key = f"pending:{chat}"
-        self.hear_all(chat, key)
-        lines = [x for x in self.kv.get_json(key, []) or [] if "content" in x]
-        if not lines:
-            return
+        self.settle(chat)
+        with self._q:
+            lines = [x for x in self.kv.get_json(key, []) or [] if "content" in x]
+            if not lines:
+                return
+            state = Turn(chat, [x["id"] for x in lines], _users(lines), _mid(lines[-1]))
+            self._running[chat] = state
+        try:
+            self._converse(chat, key, lines, state)
+        finally:
+            with self._q:
+                state.closed = True
+                self._running.pop(chat, None)
+            self.close_asks(state)
+
+    def _converse(self, chat: int, key: str, lines: list[dict], state: Turn) -> None:
         p = self.profile
         block_cfg = p.assistant or {}
         try:
@@ -1514,6 +1658,9 @@ class Bot:
                 log_text,
                 [x["content"] for x in lines],
             )
+            turn["incoming"] = self._incoming(state, key)
+            if assistant.asks(self.data, block_cfg.get("plugin")):
+                turn["ask"] = self._asker(state)
             reply = assistant.converse(
                 self.data, block_cfg.get("plugin"), turn, assistant.settings(block_cfg)
             )
@@ -1521,6 +1668,9 @@ class Bot:
             log.warning("ai turn failed: %s", safe(e))
             self.post(chat, self.t("ai_down"), self.today_keyboard())
             return
+        finally:
+            with self._q:
+                state.closed = True  # a plugin thread that outlives the turn takes nothing more
         if not reply.kept:
             log.warning("ai turn not kept")
             self.post(chat, self.t("ai_down"), self.today_keyboard())
@@ -1534,25 +1684,94 @@ class Bot:
                 self.kv.set(f"conv:{chat}", reply.conversation)
             else:
                 self.kv.delete(f"conv:{chat}")
+        # what the answer covers: the lines it started with, and the handed-over lines it names
+        handed = [
+            x
+            for x in self.kv.get_json(key, []) or []
+            if x.get("id") in state.pulled and x.get("id") in reply.covers
+        ]
+        covered = [*lines, *handed]
+        reply_to = _mid(covered[0]) if len(covered) == 1 else None
         text, block = assistant.extract(reply.text)
         text, settings = assistant.extract(text, "settings")
-        if text and not self.say(chat, text, lines[-1]["id"]):
+        text, offered = assistant.extract_options(text)
+        offered = reply.options or offered
+        users = _users(covered)
+        if text and not self.say(chat, text, reply_to, offered, users):
             # she never saw the answer: a failed turn, so the buttons and the lines stay
             self.post(chat, self.t("ai_down"), self.today_keyboard())
             return
         if block is not None:
-            source = "admin" if all(x.get("admin") for x in lines) else "telegram"
+            source = "admin" if all(x.get("admin") for x in covered) else "telegram"
             self.apply_block(chat, block, source, today)
         if settings is not None:
             self.apply_settings(chat, settings)
+        if text:
+            self.remember(chat, covered, text)
         # last, so a crash before here sends the lines again; a block applied twice changes
         # nothing the second time
-        taken = {x["id"] for x in lines}
+        taken = {x["id"] for x in covered}
         self.kv.update_json(key, lambda cur: [x for x in cur or [] if x["id"] not in taken] or None)
+        missed = len(state.pulled) - len(handed)
+        if handed or missed:
+            log.info("handed over: covered=%d next_turn=%d", len(handed), missed)
         if reply.later is not None:
             job = reply.later
             self.later.submit(lambda: self.run_later(chat, job))
             log.info("later queued")
+
+    def _incoming(self, state: Turn, key: str) -> Callable[[], list[dict]]:
+        """`turn["incoming"]`: the chat's text lines queued since the turn started and not handed
+        over yet, for the plugin's thread. Once the turn is over it hands over nothing, so a late
+        call steals nothing from the next turn."""
+
+        def incoming() -> list[dict]:
+            with self._q:
+                if state.closed:
+                    return []
+                got = [
+                    x
+                    for x in self.kv.get_json(key, []) or []
+                    if "content" in x and not state.has(x.get("id"))
+                ]
+                state.pulled.extend(x["id"] for x in got)
+                for uid in _users(got):
+                    if uid not in state.users:
+                        state.users.append(uid)
+            return [
+                {
+                    "id": x["id"],
+                    "role": "user",
+                    "content": x["content"],
+                    "ts": datetime.fromtimestamp(int(x.get("ts") or 0), UTC).isoformat(),
+                }
+                for x in got
+            ]
+
+        return incoming
+
+    def remember(self, chat: int, covered: Sequence[Mapping], answer: str) -> None:
+        """Keep the words of the messages an answer covered, with that answer, so an edit of one
+        of them can say what changed (`said:<chat>`, the newest SAID_MAX, none older than 7
+        days)."""
+        now = int(self.now().timestamp())
+        said = {
+            str(_mid(x)): {"body": x["body"], "answer": answer[:ANSWER_CLIP], "ts": now}
+            for x in covered
+            if _mid(x) is not None and isinstance(x.get("body"), str) and not x.get("tap")
+        }
+        if not said:
+            return
+
+        def add(cur):
+            merged = {**(cur or {}), **said}
+            fresh = [
+                kv for kv in merged.items() if now - int(kv[1].get("ts", 0)) <= PENDING_MAX_AGE_S
+            ]
+            fresh.sort(key=lambda kv: kv[1].get("ts", 0))
+            return dict(fresh[-SAID_MAX:]) or None
+
+        self.kv.update_json(f"said:{chat}", add, {})
 
     def run_later(self, chat: int, job: Callable[[], str]) -> None:
         """A plugin's `later` (on the later thread): its string goes to the chat as plain text,
@@ -1570,7 +1789,354 @@ class Bot:
         if out.strip():
             self.say(chat, out.strip(), None)
 
-    # --- voice notes (worker thread) -----------------------------------------------------
+    # --- asks: an action the assistant wants to take, approved by a person ----------------
+
+    def _asker(self, state: Turn) -> Callable[[object], bool]:
+        """`turn["ask"]`: the plugin's thread asks a person to approve an action."""
+
+        def ask(request: object) -> bool:
+            return self.pose(state, request)
+
+        return ask
+
+    def approvers(self, state: Turn, confirm_by: object) -> list[int]:
+        """Who may answer an ask: the person the turn answers, when it is asked of them and that
+        person is her or an admin; else the admins (also when the turn carries several people's
+        messages)."""
+        users = list(state.users)
+        if confirm_by == "asker" and len(users) == 1 and self.role(users[0]) is not None:
+            return users
+        return list(self.profile.admins)
+
+    def names(self, users: Sequence[int]) -> str:
+        out = [
+            self.mention()
+            if u == self.profile.user_id
+            else html.escape(self.profile.admins.get(u, ""))
+            for u in users
+        ]
+        return ", ".join(x for x in out if x)
+
+    def pose(self, state: Turn, request: object) -> bool:
+        """Post one of the plugin's asks with Approve and Reject (on the plugin's thread). True
+        once it is settled: posted, or declined at once because nobody can answer it or Telegram
+        refused it. False when Telegram could not be reached: the plugin asks again later."""
+        if not isinstance(request, Mapping) or not isinstance(request.get("id"), str):
+            return True
+        request = dict(request)
+        summary = str(request.get("summary") or "").strip()
+        with self._q:
+            if any(a["request"].get("id") == request["id"] for a in self.asks.values()):
+                return True
+        by = self.approvers(state, request.get("confirm_by"))
+        expires = request.get("expires_at")
+        ok_end = isinstance(expires, int | float) and not isinstance(expires, bool)
+        expires = float(expires) if ok_end else time.time() + ASK_DEFAULT_S
+        if state.closed or not by or not summary or expires <= time.time():
+            self.decline(request, NO_ONE)
+            log.info("ask declined: nobody to ask")
+            return True
+        key = secrets.token_hex(4)
+        text = self.t("ask_confirm", name=self.names(by), summary=html.escape(summary, quote=False))
+        markup = _keyboard(
+            [[(self.t("button_approve"), f"a:{key}:y"), (self.t("button_reject"), f"a:{key}:n")]]
+        )
+        where = (
+            {"message_id": state.mid, "allow_sending_without_reply": True} if state.mid else None
+        )
+        try:
+            sent = self.send(state.chat, text, markup, reply_parameters=where)
+        except TelegramError as e:
+            log.warning("ask not posted: %s", safe(e))
+            if e.code == 0 or e.code == 429 or e.code >= 500:
+                return False  # Telegram was not reached: kept, asked again on the next look
+            self.decline(request, NO_ONE)
+            return True
+        item = {
+            "request": request,
+            "by": by,
+            "chat": state.chat,
+            "msg": (sent or {}).get("message_id"),
+            "expires": expires,
+        }
+        with self._q:
+            self.asks[key] = item
+            state.asks.append(key)
+            late = state.closed
+        if late:  # the turn ended while it was posted
+            self.close_asks(state)
+        log.info("ask posted")
+        return True
+
+    def decline(self, request: Mapping, note: str, by: str = "bot") -> None:
+        block = self.profile.assistant or {}
+        try:
+            assistant.answer(
+                self.data,
+                block.get("plugin"),
+                dict(request),
+                {"approved": False, "by": by, "note": note},
+                assistant.settings(block),
+            )
+        except Exception as e:  # noqa: BLE001 - the ask expires on the provider's side anyway
+            log.warning("could not decline an ask: %s", safe(e))
+
+    def tapped_ask(self, cq: Mapping, chat: int, data: str, user: object) -> None:
+        """Approve or Reject: only from the people the ask names, once, before it expires. The
+        answer goes back to the plugin off the poll loop; after an approval the chat hears
+        whether it went through."""
+        _, key, choice = [*data.split(":"), "", ""][:3]
+        mid = (cq.get("message") or {}).get("message_id")
+        with self._q:
+            item = self.asks.get(key)
+            if item is not None and item["expires"] <= time.time():
+                self.asks.pop(key, None)
+                item = None
+            mine = item is not None and user in item["by"]
+            if mine:
+                self.asks.pop(key, None)  # answered once
+        if item is None:
+            self.answer(cq["id"], self.t("tap_gone"))
+            self.unbutton(chat, mid)
+            return
+        if not mine:
+            self.answer(cq["id"], self.t("tap_not_yours", name=self.plain_names(item["by"])))
+            return
+        yes = choice == "y"
+        self.answer(cq["id"])
+        self.unbutton(
+            chat, item["msg"], "✓ " + self.t("button_approve" if yes else "button_reject")
+        )
+        self.side.submit(lambda: self.settle_ask(item, yes, user))
+        log.info("ask answered")
+
+    def plain_names(self, users: Sequence[int]) -> str:
+        """Names for a toast, which shows no HTML."""
+        out = [self.who(self.role(u) or "", u) or "" for u in users]
+        return ", ".join(x for x in out if x)
+
+    def settle_ask(self, item: Mapping, yes: bool, user: object) -> None:
+        """The tap, back to the plugin (on the asks thread). After an approval the chat hears
+        «Hecho» or why it failed; after a rejection the turn's answer says what came of it."""
+        block = self.profile.assistant or {}
+        try:
+            out = assistant.answer(
+                self.data,
+                block.get("plugin"),
+                dict(item["request"]),
+                {"approved": yes, "by": str(user), "note": None},
+                assistant.settings(block),
+            )
+        except Exception as e:  # noqa: BLE001 - the plugin may raise anything
+            log.warning("an ask's answer failed: %s", safe(e))
+            out = {"ok": False, "error": None}
+        if not yes:
+            return
+        if out.get("ok"):
+            said = self.t("ask_done")
+        elif out.get("error"):
+            said = self.t("ask_failed", error=html.escape(str(out["error"])[:300], quote=False))
+        else:
+            said = self.t("ask_failed_unknown")
+        where = {"message_id": item["msg"], "allow_sending_without_reply": True}
+        self.post(item["chat"], said, reply_parameters=where if item["msg"] else None)
+
+    def close_asks(self, state: Turn, note: str | None = None) -> None:
+        """The turn ended, or a message of it was edited: its open asks lose their buttons. With
+        a note, each is declined with it first and the chat hears why."""
+        with self._q:
+            keys, state.asks[:] = list(state.asks), []
+            items = [self.asks.pop(k) for k in keys if k in self.asks]
+        for item in items:
+            if note:
+                self.decline(item["request"], note)
+            self.unbutton(item["chat"], item["msg"])
+            if note:
+                where = {"message_id": item["msg"], "allow_sending_without_reply": True}
+                self.post(item["chat"], self.t("ask_edited"), reply_parameters=where)
+
+    def expire_asks(self) -> None:
+        """Past its end an ask loses its buttons; the plugin's side has already heard it."""
+        now = time.time()
+        with self._q:
+            gone = [k for k, v in self.asks.items() if v["expires"] <= now]
+            items = [self.asks.pop(k) for k in gone]
+        for item in items:
+            self.unbutton(item["chat"], item["msg"])
+
+    def unbutton(self, chat: int, message_id: object, label: str | None = None) -> None:
+        """Take the buttons off a message (best effort); `label`: one inert button that says what
+        was chosen instead."""
+        if not message_id:
+            return
+        markup = _keyboard([[(label, "x")]]) if label else {"inline_keyboard": []}
+        try:
+            self.tg.call(
+                "editMessageReplyMarkup", chat_id=chat, message_id=message_id, reply_markup=markup
+            )
+        except TelegramError as e:
+            log.info("buttons not removed: %s", safe(e))
+
+    # --- choices under an answer ---------------------------------------------------------
+
+    def yes_no(self, labels: Sequence[str]) -> bool:
+        return sorted(fold(x) for x in labels) == sorted(
+            fold(self.t(k)) for k in ("button_yes", "button_no")
+        )
+
+    def offer(self, chat: int, msg: object, key: str, labels: Sequence[str], users) -> None:
+        now = int(self.now().timestamp())
+        item = {"key": key, "msg": msg, "labels": list(labels), "for": list(users), "ts": now}
+
+        def add(cur):
+            kept = [o for o in cur or [] if now - int(o.get("ts", 0)) <= OPTIONS_TTL_S]
+            return [*kept, item][-OPTIONS_KEEP:]
+
+        self.kv.update_json(f"options:{chat}", add, [])
+
+    def tapped_option(self, cq: Mapping, chat: int, data: str, user: object, role: str) -> None:
+        """A choice under an answer: that person's next message, as if typed. The buttons give
+        way to the one chosen; only the people the answer was for may tap, once."""
+        _, key, choice = [*data.split(":"), "", ""][:3]
+        mid = (cq.get("message") or {}).get("message_id")
+        now = int(self.now().timestamp())
+        offers = self.kv.get_json(f"options:{chat}", []) or []
+        item = next((o for o in offers if o.get("key") == key), None)
+        if item is None or now - int(item.get("ts", 0)) > OPTIONS_TTL_S:
+            self.answer(cq["id"], self.t("tap_gone"))
+            self.unbutton(chat, mid)
+            return
+        if item.get("for") and user not in item["for"]:
+            self.answer(cq["id"], self.t("tap_not_yours", name=self.plain_names(item["for"])))
+            return
+        labels = item.get("labels") or []
+        if not choice.isdigit() or int(choice) >= len(labels):
+            self.answer(cq["id"])
+            return
+        label = labels[int(choice)]
+        self.kv.update_json(
+            f"options:{chat}", lambda cur: [o for o in cur or [] if o.get("key") != key] or None
+        )
+        self.answer(cq["id"])
+        self.unbutton(chat, mid, f"✓ {label}")
+        line = {
+            "id": f"o{key}",
+            "mid": mid,
+            "ts": now,
+            "content": f"{self.who(role, user)}: {label}",
+            "admin": role == ADMIN,
+            "uid": user,
+            "body": label,
+            "tap": True,
+        }
+        self.queue_line(chat, line)
+        log.info("option tapped")
+
+    # --- edits ---------------------------------------------------------------------------
+
+    def on_edit(self, msg: Mapping) -> None:
+        """An edited text from her or an admin, handled by where its line is: still queued, the
+        new wording goes; in the running turn, its open asks are declined and a correction joins
+        it; already answered, a new line asks to check that answer; unknown, a new message when
+        it now addresses the bot. An edit is never a command, and one that changes no word does
+        nothing."""
+        text = msg.get("text")
+        if not isinstance(text, str) or not text.strip() or text.strip().startswith("/"):
+            return
+        chat = msg.get("chat") or {}
+        user = (msg.get("from") or {}).get("id")
+        role = self.role(user)
+        if role is None or not self.has_assistant:
+            return
+        private = chat.get("type") == "private"
+        if not private and chat.get("id") != self.chat_id:
+            return
+        chat_id, mid = chat["id"], msg.get("message_id")
+        body = self._strip_mention(msg, text)[0].strip()
+        key = f"pending:{chat_id}"
+        found: list[dict] = []
+
+        def swap(cur):
+            out = []
+            for x in cur or []:
+                if x.get("id") == mid and "content" in x and "body" in x:
+                    found.append(dict(x))
+                    if _words(x["body"]) != _words(body):
+                        head = x["content"][: len(x["content"]) - len(x["body"])]
+                        if not x["content"].endswith(x["body"]):
+                            head = f"{self.who(role, user)}: "
+                        x = {**x, "content": head + body, "body": body}
+                        x["ts"] = int(self.now().timestamp())
+                out.append(x)
+            return out or None
+
+        with self._q:
+            state = self._running.get(chat_id)
+            running = state is not None and state.has(mid)
+            if not running:
+                self.kv.update_json(key, swap, [])
+                if found:
+                    self._newest[chat_id] = self.clock()
+        if found:  # still queued: the debounce starts over with the new wording
+            self.worker.submit(chat_id)
+            log.info("edit: queued line")
+            return
+        name = self.who(role, user)
+        line = {"mid": mid, "admin": role == ADMIN, "uid": user, "body": body}
+        line["ts"] = int(self.now().timestamp())
+        line["id"] = f"e{mid}.{secrets.token_hex(3)}"
+        if running:
+            old = state.edited.get(mid)
+            if old is None:
+                pending = self.kv.get_json(key, []) or []
+                old = next((x.get("body", "") for x in pending if x.get("id") == mid), "")
+            if _words(old) == _words(body):
+                return
+            state.edited[mid] = body
+            line["content"] = (
+                f"[{name} edited a message of this turn. Reconsider your answer with the new "
+                f"wording.]\nBefore: {old}\nNow: {body}"
+            )
+
+            def correct(state=state, line=line, chat_id=chat_id, body=body):
+                self.close_asks(state, f"editado: {body}")
+                self.queue_line(chat_id, line)
+
+            self.side.submit(correct)
+            log.info("edit: running turn")
+            return
+        said = (self.kv.get_json(f"said:{chat_id}", {}) or {}).get(str(mid))
+        if said is not None:
+            if _words(said.get("body", "")) == _words(body):
+                return
+            line["content"] = (
+                f"[{name} edited a message you already answered. Check whether your answer still "
+                f"holds with the new wording, and say what changes.]\nBefore: {said.get('body', '')}"
+                f"\nNow: {body}\nYour answer was: {said.get('answer', '')}"
+            )
+            self.queue_line(chat_id, line)
+            log.info("edit: answered message")
+            return
+        content = self.addressed(msg, text, private, role)
+        if content is not None:
+            self.queue_text(chat_id, msg, content, role, body)
+            log.info("edit: new message")
+
+    # --- voice notes (hearing thread) ----------------------------------------------------
+
+    def resume_notes(self) -> None:
+        """At start: voice notes a restart left unheard go to the hearing thread again."""
+        for key in self.kv.keys("pending:"):
+            if any("voice" in x for x in self.kv.get_json(key, []) or []):
+                self.hearer.submit(int(key.removeprefix("pending:")))
+
+    def _hear_chat(self, chat: int) -> None:
+        """Hear every voice note waiting in the chat, then queue its turn: a note heard while a
+        turn runs is handed to it, else it goes with the next one."""
+        try:
+            self.hear_all(chat, f"pending:{chat}")
+        finally:
+            self.worker.submit(chat)
 
     def hear_all(self, chat: int, key: str) -> None:
         """Turn every voice line waiting in `pending:<chat>` into a text line, oldest first. A
@@ -1578,20 +2144,27 @@ class Bot:
         for line in self.kv.get_json(key, []) or []:
             if "voice" not in line:
                 continue
-            content = self.hear(chat, line)
+            try:
+                content = self.hear(chat, line)
 
-            def settle(cur, line_id=line["id"], content=content):
-                out = []
-                for x in cur or []:
-                    if x.get("id") == line_id and "voice" in x:
-                        if content is None:
-                            continue
-                        x = {k: v for k, v in x.items() if k not in ("voice", "who")}
-                        x["content"] = content
-                    out.append(x)
-                return out or None
+                def settle(cur, line_id=line["id"], content=content):
+                    out = []
+                    for x in cur or []:
+                        if x.get("id") == line_id and "voice" in x:
+                            if content is None:
+                                continue
+                            x = {k: v for k, v in x.items() if k not in ("voice", "who")}
+                            x["content"] = content
+                        out.append(x)
+                    return out or None
 
-            self.kv.update_json(key, settle)
+                self.kv.update_json(key, settle)
+            finally:
+                with self._q:
+                    notes = self._voicing.get(chat) or {}
+                    notes.pop(line["id"], None)
+                    if not notes:
+                        self._voicing.pop(chat, None)
 
     def hear(self, chat: int, line: Mapping) -> str | None:
         """One voice note: `getFile`, the download, the plugin's `transcribe`, then the «🎤»
@@ -1639,20 +2212,35 @@ class Bot:
         self.post(chat, self.t("voice_echo", text=html.escape(shown)), reply_parameters=note)
         return f"{line.get('who') or ''}: [voice note] {text}"
 
-    def say(self, chat: int, text: str, reply_to: int | None) -> bool:
+    def say(
+        self,
+        chat: int,
+        text: str,
+        reply_to: int | None,
+        offered: Sequence[str] = (),
+        users: Sequence[int] = (),
+    ) -> bool:
         """An assistant answer: plain text, a reply to her message, split at Telegram's limit.
-        One that ends with a question carries a selective force_reply on its last part, so her
-        answer reaches the bot too. False when a part could not be sent."""
+        With choices (`offered`) its last part carries them as buttons, for `users` to tap, and a
+        line saying they may answer in their own words instead; without, one that ends with a
+        question carries a selective force_reply, so her answer reaches the bot too. False when a
+        part could not be sent."""
+        key = secrets.token_hex(4) if offered else None
+        if offered:
+            hint = self.t("yes_no_hint" if self.yes_no(offered) else "options_hint")
+            text = f"{text}\n\n{hint}"
         parts = split_text(text)
         for i, part in enumerate(parts):
             markup = None
-            if i == len(parts) - 1 and text.rstrip().endswith("?"):
+            if i == len(parts) - 1 and key:
+                markup = _keyboard([[(label, f"o:{key}:{n}")] for n, label in enumerate(offered)])
+            elif i == len(parts) - 1 and text.rstrip().endswith("?"):
                 markup = {"force_reply": True, "selective": True}
             parameters = None
             if reply_to and i == 0:
                 parameters = {"message_id": reply_to, "allow_sending_without_reply": True}
             try:
-                self.tg.call(
+                sent = self.tg.call(
                     "sendMessage",
                     chat_id=chat,
                     text=part,
@@ -1662,6 +2250,9 @@ class Bot:
             except TelegramError as e:
                 log.warning("send failed: %s", safe(e))
                 return False
+        if key:
+            msg = sent.get("message_id") if isinstance(sent, Mapping) else None
+            self.offer(chat, msg, key, offered, users)
         return True
 
     def apply_block(self, chat: int, block: object, source: str, today: date) -> None:
