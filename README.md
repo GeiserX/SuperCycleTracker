@@ -21,6 +21,7 @@ SuperCycleTracker is a menstrual cycle tracker that lives in a Telegram group. I
 - Imports an Apple Health export to seed the history.
 - In the group it reads replies to the bot, answers to its questions, commands, and messages that mention it when Telegram delivers them; as a group admin it reads all of her messages. Voice notes from her or an admin are always heard, when the plugin can transcribe. It also answers private chats with her or an admin.
 - Works without any AI: buttons and `/anotar` write records directly. An optional assistant plugin reads free text and answers questions.
+- The assistant reads the shared assistant principles first, in English or Spanish (`supercycletracker/principles/`): twelve rules on whom it answers, buttons, offers, privacy and honest results. The bot's own rules in `rules.md` follow them and only add what is specific to tracking a cycle. The files are copied unchanged from the shared text, and a test pins their hashes.
 - A burst of messages gets one answer, and what she writes while it thinks joins that answer. An edited message is taken into account. Choices come as buttons she can tap or ignore, and an action the assistant wants to take waits for Approve or Reject.
 - Optionally reads the rest of the group as context, marked as not addressed to it, and keeps a chat log so a fresh conversation starts from the last two weeks of the chat. A remark between people is never taken as an order.
 - Offers what it can do instead of doing it unasked: a reminder here or in her calendar, or the predicted phases and next period as calendar entries, with buttons. Without an answer nothing happens, and `/recordatorios` lists and cancels the reminders set.
@@ -55,7 +56,7 @@ Or with Docker, the data directory mounted at `/data` and owned by uid 1000:
 ```sh
 docker run -d --name supercycletracker \
   -e TELEGRAM_BOT_TOKEN -e SCT_GIT_TOKEN -e TZ=Europe/Madrid \
-  -v "$PWD/data:/data" drumsergio/supercycletracker:0.4.1
+  -v "$PWD/data:/data" drumsergio/supercycletracker:0.4.2
 ```
 
 Only one process may poll a bot token. `sct say` does not poll, so it is safe beside the running bot.
