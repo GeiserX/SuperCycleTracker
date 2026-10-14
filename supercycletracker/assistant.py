@@ -186,18 +186,22 @@ def extract_options(text: str) -> tuple[str, tuple[str, ...]]:
     return clean, options(labels)
 
 
-_ABANDONED: dict[str, threading.Thread] = {}  # per plugin path: a call that outlived its wait
+# per plugin path and function: a call that outlived its wait
+_ABANDONED: dict[str, threading.Thread] = {}
 
 
 def _call(data: str | Path, rel: str | None, fn: Callable, args: tuple, plugin_settings: dict):
     """Run a plugin function in its own daemon thread and wait at most `timeout_s`.
 
     The app cannot stop a plugin: a call that outlives the wait is abandoned and counts as
-    failed (`PluginError("timeout")`). Until that call returns, the plugin is not called again
-    (`PluginError("plugin_busy")`), so it never runs two calls at once. The plugin's own
-    exception is raised as it is; an exit that is not an `Exception` (`SystemExit`,
-    `KeyboardInterrupt`) becomes `PluginError("plugin_aborted")`."""
-    key = str((Path(data) / str(rel)).resolve())
+    failed (`PluginError("timeout")`). Until that call returns, the same function is not called
+    again (`PluginError("plugin_busy")`), so a turn never starts beside an abandoned turn. The
+    functions themselves may run at once: a note is heard and an ask answered while a turn
+    runs, so one abandoned function never blocks another, and a call that ends clears only a
+    marker whose thread has ended too. The plugin's own exception is raised as it is; an exit
+    that is not an `Exception` (`SystemExit`, `KeyboardInterrupt`) becomes
+    `PluginError("plugin_aborted")`."""
+    key = f"{(Path(data) / str(rel)).resolve()}:{getattr(fn, '__name__', '?')}"
     previous = _ABANDONED.get(key)
     if previous is not None and previous.is_alive():
         raise PluginError("plugin_busy")
@@ -215,7 +219,9 @@ def _call(data: str | Path, rel: str | None, fn: Callable, args: tuple, plugin_s
     if thread.is_alive():
         _ABANDONED[key] = thread
         raise PluginError("timeout")
-    _ABANDONED.pop(key, None)
+    stale = _ABANDONED.get(key)
+    if stale is not None and not stale.is_alive():
+        _ABANDONED.pop(key, None)
     error = box.get("error")
     if error is not None:
         if not isinstance(error, Exception):  # SystemExit and the like must not end the worker

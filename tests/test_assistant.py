@@ -180,6 +180,70 @@ def test_a_plugin_that_outlives_its_time_is_a_timeout(data):
         release.set()
 
 
+def test_a_note_that_outlives_its_time_does_not_block_a_turn(data):
+    """Notes are heard on their own thread: an abandoned transcribe keeps transcribe busy, never
+    converse."""
+    mod = assistant.load_module(data, "plugins/fake.py")
+    release = threading.Event()
+    mod.VOICES[:] = [lambda: release.wait(5) and "tarde"]
+    try:
+        with pytest.raises(PluginError, match="timeout"):
+            assistant.transcribe(
+                data, "plugins/fake.py", b"x", "audio/ogg", "es", {"timeout_s": 0.2}
+            )
+        turn = assistant.turn(None, "r", "c", "", ["x"])
+        assert assistant.converse(data, "plugins/fake.py", turn, {"timeout_s": 5}).text == "Vale."
+        with pytest.raises(PluginError, match="plugin_busy"):
+            assistant.transcribe(data, "plugins/fake.py", b"x", "audio/ogg", "es", {"timeout_s": 5})
+    finally:
+        release.set()
+
+
+def test_a_call_that_ends_keeps_the_guard_of_one_abandoned_beside_it(data):
+    """Two answers to asks may run at once (a decline from the plugin's thread, a tap from the
+    asks thread). The one that ends must not clear the marker of the one abandoned meanwhile."""
+    mod = assistant.load_module(data, "plugins/fake.py")
+    slow_in, abandoned, release = threading.Event(), threading.Event(), threading.Event()
+
+    def slow(*_):
+        slow_in.set()
+        release.wait(5)
+        return {"ok": True}
+
+    def fast(*_):
+        abandoned.wait(5)  # still running when the slow one is abandoned, ends after it
+        return {"ok": True}
+
+    calls = iter([slow, fast])
+    mod.answer = lambda request, decision, settings: next(calls)()
+    out = {}
+
+    def tap():
+        out["fast"] = assistant.answer(data, "plugins/fake.py", {}, {}, {"timeout_s": 5})
+
+    first = threading.Thread(target=lambda: _abandon(data, out, abandoned))
+    first.start()
+    assert slow_in.wait(5)
+    second = threading.Thread(target=tap)
+    second.start()
+    first.join(5)
+    second.join(5)
+    try:
+        assert out == {"slow": "timeout", "fast": {"ok": True, "error": None}}
+        with pytest.raises(PluginError, match="plugin_busy"):  # the slow one still runs
+            assistant.answer(data, "plugins/fake.py", {}, {}, {"timeout_s": 5})
+    finally:
+        release.set()
+
+
+def _abandon(data, out, abandoned):
+    try:
+        assistant.answer(data, "plugins/fake.py", {}, {}, {"timeout_s": 0.3})
+    except PluginError as e:
+        out["slow"] = e.code
+    abandoned.set()
+
+
 def test_the_plugins_own_exception_goes_up_as_it_is(data):
     mod = assistant.load_module(data, "plugins/fake.py")
     mod.REPLIES[:] = [KeyError("boom")]

@@ -734,7 +734,7 @@ def test_after_a_timeout_the_plugin_is_not_called_again_until_it_returns(make_bo
         ) == 2
     finally:
         release.set()
-    abandoned = assistant._ABANDONED[str((bot.data / "plugins" / "fake.py").resolve())]
+    abandoned = assistant._ABANDONED[f"{(bot.data / 'plugins' / 'fake.py').resolve()}:converse"]
     abandoned.join(5)
     mod.REPLIES[:] = []
     say(bot, "tres", reply_to=QUESTION)
