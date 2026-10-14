@@ -290,12 +290,15 @@ def test_an_edit_during_the_turn_declines_its_asks_and_joins_as_a_correction(mak
 # --- asks ----------------------------------------------------------------------------------
 
 
-def ask_request(rid="job1:ap1", confirm_by="asker", expires_in=60):
+END = int(time.time()) + 3600  # one end for every ask of the run: a request compares equal
+
+
+def ask_request(rid="job1:ap1", confirm_by="asker"):
     return {
         "id": rid,
         "summary": 'Quiero añadir esto al calendario:\n{"summary": "Cita <revisión>"}',
         "confirm_by": confirm_by,
-        "expires_at": round(time.time() + expires_in),
+        "expires_at": END,
     }
 
 
