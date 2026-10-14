@@ -9,8 +9,8 @@ from supercycletracker import assistant
 # The shared assistant principles, byte for byte. A change to them lands here on purpose, never by
 # accident: copy the new text into supercycletracker/principles/ and update the hash.
 SHA256 = {
-    "en": "20c8da6b8f6fb7456d126bfe5fb4516261299e10b7556aed1849e243f43856ac",
-    "es": "49e40b0b7108c578813ee343cb93edc687ad0721646a6e219ce7845547ceb5ca",
+    "en": "713784a662236621bf63709f07ac811199b2bf779e95b986a475e2087ab1713a",
+    "es": "dbd6efd497a264a8dd43e6f5b0ceeb78d3b97c5d61536fceb03505c970937bd1",
 }
 HEADING = {"en": "## Principles", "es": "## Principios"}
 
