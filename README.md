@@ -19,7 +19,7 @@ SuperCycleTracker is a menstrual cycle tracker that lives in a Telegram group. I
 - She changes the ask hour from the chat, in words or with `/hora 21:30`; the bot commits the profile change itself.
 - Predicts the next period from the logged history, and says so when a period closes.
 - Imports an Apple Health export to seed the history.
-- In the group it reads replies to the bot, answers to its questions, commands, and messages that mention it when Telegram delivers them; as a group admin it reads all of her messages. Voice notes from her or an admin are always heard, when the plugin can transcribe, and their photos and PDFs always reach the assistant. It also answers private chats with her or an admin.
+- In the group it reads replies to the bot, answers to its questions, commands, and messages that mention it when Telegram delivers them; as a group admin it reads all of her messages. Voice notes from her or an admin are always heard, when the plugin can transcribe, and their photos and files of any kind always reach the assistant. It also answers private chats with her or an admin.
 - Works without any AI: buttons and `/anotar` write records directly. An optional assistant plugin reads free text and answers questions.
 - The assistant reads the shared assistant principles first, in English or Spanish (`supercycletracker/principles/`): twelve rules on whom it answers, buttons, offers, privacy and honest results. The bot's own rules in `rules.md` follow them and only add what is specific to tracking a cycle. The files are copied unchanged from the shared text, and a test pins their hashes.
 - A burst of messages gets one answer, and what she writes while it thinks joins that answer. An edited message is taken into account. Choices come as buttons she can tap or ignore, and an action the assistant wants to take waits for Approve or Reject.
@@ -56,7 +56,7 @@ Or with Docker, the data directory mounted at `/data` and owned by uid 1000:
 ```sh
 docker run -d --name supercycletracker \
   -e TELEGRAM_BOT_TOKEN -e SCT_GIT_TOKEN -e TZ=Europe/Madrid \
-  -v "$PWD/data:/data" drumsergio/supercycletracker:0.4.5
+  -v "$PWD/data:/data" drumsergio/supercycletracker:0.4.6
 ```
 
 Only one process may poll a bot token. `sct say` does not poll, so it is safe beside the running bot.
@@ -127,7 +127,7 @@ def transcribe(audio: bytes, mime: str, language: str, settings: dict) -> str: .
 def answer(request: dict, decision: dict, settings: dict) -> dict: ...
 ```
 
-`turn` has `conversation` (what the plugin returned last time in this chat, or `None`), `rules`, `context`, `files` (`{"cycle/log.jsonl": <whole file>}`), `new` (her lines the plugin has not kept yet) and `attachments` (the photos and PDFs those lines name, `{"name": "inbox/<id>-<name>", "mime", "data": bytes, "from"}`). `settings` is the `assistant:` block minus `plugin` and `instructions`. Return a string, or `{"text", "conversation", "kept", "later"}`; `later` is an optional callable the app runs on a background thread after posting the text, posting the string it returns. The text may end with one fenced `record` block, and one `settings` block when she asks to change the ask hour. The app validates each, all or nothing, and writes the confirmation itself from what it saved. `kept: false` counts as a failed turn: nothing is applied and her lines go again with the next one. The plugin must return before `timeout_s`.
+`turn` has `conversation` (what the plugin returned last time in this chat, or `None`), `rules`, `context`, `files` (`{"cycle/log.jsonl": <whole file>}`), `new` (her lines the plugin has not kept yet) and `attachments` (the photos and files those lines name, `{"name": "inbox/<id>-<name>", "mime", "data": bytes, "from"}`). `settings` is the `assistant:` block minus `plugin` and `instructions`. Return a string, or `{"text", "conversation", "kept", "later"}`; `later` is an optional callable the app runs on a background thread after posting the text, posting the string it returns. The text may end with one fenced `record` block, and one `settings` block when she asks to change the ask hour. The app validates each, all or nothing, and writes the confirmation itself from what it saved. `kept: false` counts as a failed turn: nothing is applied and her lines go again with the next one. The plugin must return before `timeout_s`.
 
 While it works, the plugin may call `turn["incoming"]()` for the messages that arrived since the turn started and name the ones its answer covered in `covers`; the rest go with the next turn. It may offer choices as buttons (`options`, or an `options` block in the text). A plugin that defines `answer` also gets `turn["ask"]`, which posts an action the assistant wants to take with Approve and Reject and calls `answer` on the tap.
 

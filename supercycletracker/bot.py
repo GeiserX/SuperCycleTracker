@@ -7,7 +7,7 @@ thread runs assistant turns, one at a time, so a tap is answered while the assis
 offset moves only once a line is written, and a line leaves the queue only once its answer is sent,
 so a restart answers what was queued or in flight (`resume`). A voice
 note from her or an admin is queued the same way and turned into text by the plugin on a hearing
-thread. A photo or a PDF from her or an admin is queued as a line naming the file, and the turn
+thread. A photo or any other file from her or an admin is queued as a line naming it, and the turn
 that takes it downloads it and hands it to the plugin (`turn["attachments"]`). Slow work a plugin hands back with its answer (`later`) runs on a third thread, one job at a
 time, and a person's answer to an action the assistant wants to take goes back on a fourth.
 
@@ -77,15 +77,8 @@ EVE_SUMMARY_MIN = 3  # /resumen tells the day-before pattern from this many star
 PAIN_HIGH = 8  # a day crossing into this pain or more posts `pain_high`
 TEXT_MAX = 4096  # Telegram's limit on one message, in UTF-16 code units
 VOICE_MAX = 20 * 1024 * 1024  # the largest file the Bot API lets a bot download
-FILE_MAX = VOICE_MAX  # a photo or a PDF, the same limit
-TURN_FILES_MAX = 25 * 1024 * 1024  # the photos and PDFs one turn carries at most
-# the files the assistant can read, by the extension their inbox/ name gets
-FILE_MIMES = {
-    "image/jpeg": ".jpg",
-    "image/png": ".png",
-    "image/webp": ".webp",
-    "application/pdf": ".pdf",
-}
+FILE_MAX = VOICE_MAX  # a photo or a file, the same limit
+TURN_FILES_MAX = 25 * 1024 * 1024  # the photos and files one turn carries at most
 ECHO_MAX = 4000  # the «🎤» echo of a transcript is cut to this, in UTF-16 code units
 ADMIN_STATUSES = frozenset({"administrator", "creator"})  # a group admin gets every message
 NOT_MODIFIED = "message is not modified"
@@ -442,12 +435,17 @@ def _users(lines: Sequence[Mapping]) -> list[int]:
     return list(dict.fromkeys(x["uid"] for x in lines if x.get("uid")))
 
 
-def _safe_stem(name: str, fallback: str) -> str:
-    """A file name's stem in plain ASCII letters, digits, `-` and `_`, at most 60 of them."""
+def _safe_name(name: str, fallback: str) -> str:
+    """A file name in plain ASCII: the stem in letters, digits, `-` and `_` (at most 60 of them,
+    `fallback` when none is left) and its extension, lower case (at most 10)."""
     folded = unicodedata.normalize("NFKD", name or "")
     ascii_ = "".join(c for c in folded if not unicodedata.combining(c))
-    stem = ascii_.rpartition(".")[0] or ascii_
-    return re.sub(r"[^A-Za-z0-9_-]+", "-", stem).strip("-")[:60] or fallback
+    stem, dot, ext = ascii_.rpartition(".")
+    if not dot:
+        stem, ext = ascii_, ""
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "-", stem).strip("-")[:60] or fallback
+    ext = re.sub(r"[^A-Za-z0-9]+", "", ext)[:10].lower()
+    return f"{stem}.{ext}" if ext else stem
 
 
 def _iso(ts: int) -> str:
@@ -1340,11 +1338,11 @@ class Bot:
         log.info("voice queued")
 
     def on_file(self, msg: Mapping) -> None:
-        """A photo, or a document that is an image or a PDF, from her or an admin, in the group or
-        a private chat. Like a voice note it is always for the bot: a photo of a test or of a
-        packet dropped in the group is meant for it. Its caption is the message. It is queued as
-        a text line naming the file, `inbox/<message id>-<name>`; the turn that takes it
-        downloads it (`fetch_files`)."""
+        """A photo or a file of any kind from her or an admin, in the group or a private chat.
+        Like a voice note it is always for the bot: a photo of a test or a report dropped in the
+        group is meant for it. Its caption is the message. It is queued as a text line naming the
+        file, `inbox/<message id>-<name>` with its own name and extension; the turn that takes it
+        downloads it (`fetch_files`). Whether the assistant can open it is the plugin's call."""
         chat = msg.get("chat") or {}
         user = (msg.get("from") or {}).get("id")
         role = self.role(user)
@@ -1362,13 +1360,11 @@ class Bot:
             name, mime, label = f"inbox/{mid}-foto.jpg", "image/jpeg", "photo"
         else:
             media = msg["document"]
-            mime = str(media.get("mime_type") or "").lower()
-            if mime not in FILE_MIMES or not media.get("file_id"):
-                self.post(chat["id"], self.t("file_kind"), reply_parameters=note)
-                log.info("file refused: kind")
+            if not isinstance(media, Mapping) or not media.get("file_id"):
                 return
-            stem = _safe_stem(str(media.get("file_name") or ""), "archivo")
-            name, label = f"inbox/{mid}-{stem}{FILE_MIMES[mime]}", "file"
+            mime = str(media.get("mime_type") or "application/octet-stream").lower()
+            safe = _safe_name(str(media.get("file_name") or ""), "archivo")
+            name, label = f"inbox/{mid}-{safe}", "file"
         size = media.get("file_size")
         if isinstance(size, int) and size > FILE_MAX:
             self.post(chat["id"], self.t("file_too_big"), reply_parameters=note)
@@ -1392,7 +1388,7 @@ class Bot:
     ) -> None:
         """Append a line to `pending:<chat>`, log it in the chat log (or reuse its `row`) and
         queue the chat for the worker. `body` is the message's own words, kept so an edit can be
-        compared with them; `file` is the photo or PDF the line names, fetched when its turn
+        compared with them; `file` is the photo or file the line names, fetched when its turn
         starts. Without an assistant: «no_ai» with today's keyboard."""
         if not self.has_assistant:
             self.post(chat, self.t("no_ai"), self.today_keyboard())
@@ -1945,7 +1941,7 @@ class Bot:
             log.info("later queued")
 
     def fetch_files(self, lines: list[dict], chat: int) -> tuple[list[dict], list[dict]]:
-        """Download the photos and PDFs of the turn's lines, 20 MiB each and 25 MiB in all, as
+        """Download the photos and files of the turn's lines, 20 MiB each and 25 MiB in all, as
         the plugin's attachments `{"name", "mime", "data", "from"}`. A line past the budget
         waits for the next turn, which is queued; a file that cannot be fetched says so under its
         message («file_too_big» or «file_failed») and its line goes on without it, saying so."""
@@ -1994,7 +1990,7 @@ class Bot:
 
     def _incoming(self, state: Turn, key: str) -> Callable[[], list[dict]]:
         """`turn["incoming"]`: the chat's text lines queued since the turn started and not handed
-        over yet, for the plugin's thread. A line with a photo or a PDF waits for the next turn,
+        over yet, for the plugin's thread. A line with a photo or a file waits for the next turn,
         which carries the file. Once the turn is over it hands over nothing, so a late call steals
         nothing from the next turn."""
 
