@@ -1607,7 +1607,7 @@ def test_a_photo_that_cannot_be_fetched_says_so_and_the_caption_still_goes(make_
     assert under(failed, msg)
     turn = mod.CALLS[0]["turn"]
     assert turn["attachments"] == []
-    assert turn["new"][0]["content"].endswith("] mira esto")
+    assert turn["new"][0]["content"] == "Lucía: [photo not downloaded] mira esto"
     assert answer["text"] == "Vale."
 
 
@@ -1623,6 +1623,10 @@ def test_photos_past_the_turn_budget_go_with_the_next_turn(make_bot, monkeypatch
     bot.worker.submit(GROUP)
     bot.join_idle()
     got = [[a["name"] for a in c["turn"]["attachments"]] for c in mod.CALLS]
+    # the held line is neither new nor history in the first turn: it waits for its own
+    first_turn = mod.CALLS[0]["turn"]
+    seen = [x["content"] for x in first_turn["new"] + first_turn["history"]]
+    assert not any(f"{second['message_id']}-archivo" in c for c in seen)
     assert got == [
         [f"inbox/{first['message_id']}-archivo.png"],
         [f"inbox/{second['message_id']}-archivo.png"],

@@ -380,6 +380,10 @@ assistant posts one line under the message:
 | over 20 MiB from `getFile` or the download | `file_too_big`, the caption goes on without the file |
 | anything else from Telegram | `file_failed`, the caption goes on without the file |
 
+A line whose file could not be fetched reaches the assistant as `[photo not downloaded]` (or `[file
+not downloaded]`) with its caption. A line held for the next turn is left out of this turn's
+`history` too.
+
 Without an assistant a photo gets `no_ai` with the keyboard, as text does.
 
 **Group talk as context.** With `telegram.history_scope: all`, every other text the bot receives in

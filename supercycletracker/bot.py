@@ -1828,6 +1828,7 @@ class Bot:
         except TelegramError as e:
             log.warning("sendChatAction failed: %s", safe(e))
         started = time.monotonic()
+        rows = {x.get("row") for x in lines}  # a line held for the next turn is not history
         lines, atts = self.fetch_files(lines, chat)
         state.ids = [x["id"] for x in lines]
         now = self.now()
@@ -1870,9 +1871,7 @@ class Bot:
                 context,
                 log_text,
                 self.new_lines(lines, seen),
-                self.history(
-                    chat, now_ts, last_row, {x.get("row") for x in lines} | {r["id"] for r in seen}
-                ),
+                self.history(chat, now_ts, last_row, rows | {r["id"] for r in seen}),
                 attachments=atts,
             )
             turn["incoming"] = self._incoming(state, key)
@@ -1949,7 +1948,7 @@ class Bot:
         """Download the photos and PDFs of the turn's lines, 20 MiB each and 25 MiB in all, as
         the plugin's attachments `{"name", "mime", "data", "from"}`. A line past the budget
         waits for the next turn, which is queued; a file that cannot be fetched says so under its
-        message («file_too_big» or «file_failed») and its line goes on without it."""
+        message («file_too_big» or «file_failed») and its line goes on without it, saying so."""
         kept, atts, total, held = [], [], 0, False
         for x in lines:
             f = x.get("file")
@@ -1978,7 +1977,8 @@ class Bot:
                     self.t("file_too_big" if too_big else "file_failed"),
                     reply_parameters=note,
                 )
-                kept.append({**x, "file": None})
+                gone = x["content"].replace(f": {f['name']}]", " not downloaded]", 1)
+                kept.append({**x, "file": None, "content": gone})
                 continue
             if atts and total + len(data) > TURN_FILES_MAX:
                 held = True
