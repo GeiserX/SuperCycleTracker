@@ -1560,14 +1560,40 @@ def test_an_admins_pdf_in_private_is_named_by_its_file(make_bot):
     assert turn["new"][0]["content"] == f"Marta: [file: {name}]"
 
 
-def test_a_file_the_assistant_cannot_read_is_refused_with_file_kind(make_bot):
+@pytest.mark.parametrize(
+    ("file_name", "mime", "safe"),
+    [
+        ("Ciclos 2027.CSV", "text/csv", "Ciclos-2027.csv"),
+        (
+            "informe.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "informe.docx",
+        ),
+        (None, None, "archivo"),
+    ],
+)
+def test_any_other_file_reaches_the_turn_with_its_own_name(make_bot, file_name, mime, safe):
     bot = make_bot()
-    doc = {"file_id": "d1", "file_name": "notas.docx", "mime_type": "application/msword"}
-    msg = photo(bot, document=doc)
-    (sent,) = bot.tg.of("sendMessage")
-    assert sent["text"] == "Solo puedo leer fotos y PDF. ¿Me lo mandas como foto o en PDF?"
-    assert under(sent, msg)
-    assert plugin(bot).CALLS == [] and bot.tg.of("getFile") == []
+    mod = plugin(bot)
+    bot.tg.files["d1"] = b"fictional bytes"
+    doc = {"file_id": "d1"}
+    if file_name:
+        doc["file_name"] = file_name
+    if mime:
+        doc["mime_type"] = mime
+    msg = photo(bot, document=doc, caption="¿lo miras?")
+    name = f"inbox/{msg['message_id']}-{safe}"
+    turn = mod.CALLS[0]["turn"]
+    assert turn["attachments"] == [
+        {
+            "name": name,
+            "mime": mime or "application/octet-stream",
+            "data": b"fictional bytes",
+            "from": "Lucía",
+        }
+    ]
+    assert turn["new"][0]["content"] == f"Lucía: [file: {name}] ¿lo miras?"
+    assert bot.tg.texts() == ["Vale."]
 
 
 def test_a_photo_from_a_stranger_or_another_chat_is_ignored(make_bot):
@@ -1617,8 +1643,9 @@ def test_photos_past_the_turn_budget_go_with_the_next_turn(make_bot, monkeypatch
     mod = plugin(bot)
     bot.tg.files["a"], bot.tg.files["b"] = b"x" * 8, b"y" * 8
     bot.worker.submit = lambda chat: None  # hold the worker: both lines queue first
-    first = photo(bot, document={"file_id": "a", "mime_type": "image/png", "file_size": 8})
-    second = photo(bot, document={"file_id": "b", "mime_type": "image/png", "file_size": 8})
+    png = {"mime_type": "image/png", "file_name": "a.png", "file_size": 8}
+    first = photo(bot, document={"file_id": "a", **png})
+    second = photo(bot, document={"file_id": "b", **png})
     del bot.worker.submit
     bot.worker.submit(GROUP)
     bot.join_idle()
@@ -1626,10 +1653,10 @@ def test_photos_past_the_turn_budget_go_with_the_next_turn(make_bot, monkeypatch
     # the held line is neither new nor history in the first turn: it waits for its own
     first_turn = mod.CALLS[0]["turn"]
     seen = [x["content"] for x in first_turn["new"] + first_turn["history"]]
-    assert not any(f"{second['message_id']}-archivo" in c for c in seen)
+    assert not any(f"{second['message_id']}-a.png" in c for c in seen)
     assert got == [
-        [f"inbox/{first['message_id']}-archivo.png"],
-        [f"inbox/{second['message_id']}-archivo.png"],
+        [f"inbox/{first['message_id']}-a.png"],
+        [f"inbox/{second['message_id']}-a.png"],
     ]
     assert bot.kv.get_json(f"pending:{GROUP}") is None
 
