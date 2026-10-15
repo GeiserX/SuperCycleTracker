@@ -1898,6 +1898,8 @@ class Bot:
                 self.new_lines(lines, seen),
                 self.history(chat, now_ts, last_row, rows | {r["id"] for r in seen}),
                 attachments=atts,
+                chat_id=chat,
+                user_id=next(iter(_users(lines)), None),  # the oldest line started the turn
             )
             turn["incoming"] = self._incoming(state, key)
             if assistant.asks(self.data, block_cfg.get("plugin")):

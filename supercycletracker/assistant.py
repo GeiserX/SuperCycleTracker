@@ -13,7 +13,8 @@ While a turn runs, the plugin may take the messages that arrived since it starte
 next turn. It may offer choices as buttons under its answer (`options`), list reminders the app
 offers with buttons (`reminders`), and, when it defines `answer`, ask a person to approve an
 action it wants to take (`turn["ask"]`). `turn["history"]` is the chat's recent log, for a
-provider that has to start a conversation over.
+provider that has to start a conversation over, and `turn["chat"]` names the Telegram chat and the
+person whose message started the turn, for a provider that can look further back in that chat.
 
 Nothing here logs: errors are `PluginError` reason codes, and a plugin's own exception goes up to
 the caller, which logs its class only (`telegram.safe`).
@@ -348,11 +349,14 @@ def turn(
     new: Sequence[str | Mapping],
     history: Sequence[Mapping] = (),
     attachments: Sequence[Mapping] = (),
+    chat_id: int | None = None,
+    user_id: int | None = None,
 ) -> dict:
     """The dict a plugin's `converse` gets: the new lines oldest first (a line is its text, or
     `{"content", "ts"}`), the chat's earlier log as `history` (`{"role", "content", "ts"}`,
-    oldest first) for a provider that has to start the conversation over, and the photos and
-    files the new lines name as `attachments` (`{"name", "mime", "data", "from"}`)."""
+    oldest first) for a provider that has to start the conversation over, the photos and
+    files the new lines name as `attachments` (`{"name", "mime", "data", "from"}`), and the
+    Telegram chat of the turn and who started it as `chat` (`{"id", "user"}`)."""
     lines = []
     for x in new:
         item = {"role": "user", "content": x if isinstance(x, str) else x["content"]}
@@ -367,6 +371,7 @@ def turn(
         "new": lines,
         "history": [dict(h) for h in history],
         "attachments": [dict(a) for a in attachments],
+        "chat": {"id": chat_id, "user": user_id},
     }
 
 
