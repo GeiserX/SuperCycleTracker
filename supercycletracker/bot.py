@@ -92,6 +92,13 @@ ECHO_MAX = 4000  # the «🎤» echo of a transcript is cut to this, in UTF-16 c
 ADMIN_STATUSES = frozenset({"administrator", "creator"})  # a group admin gets every message
 NOT_MODIFIED = "message is not modified"
 HER, ADMIN = "her", "admin"
+# what a reply points at, named for the assistant: the first kind the replied message carries
+REPLY_KINDS = (
+    (("photo",), "photo"),
+    (("video", "animation", "video_note"), "video"),
+    (("voice", "audio"), "voice"),
+    (("document", "sticker"), "file"),
+)
 ASK_WINDOW = timedelta(hours=2)  # a bot that was down at ask_at still asks up to 2 h later
 ASK_EARLIEST = clock_time(5, 0)  # a bot day starts at 05:00, so ask_at must not be earlier
 PERIOD_MAX_DAYS = range(3, 15)  # the values `period_max_day` may take
@@ -1266,6 +1273,22 @@ class Bot:
             return self.who(role, frm.get("id"))
         return " ".join(str(frm.get("first_name") or "?").split())[:64]
 
+    def replied(self, msg: Mapping) -> str:
+        """What a message replies to, for the assistant's line: « (replying to Luis's photo of
+        <UTC date>)». The bot's own line has no history, so this tells it which earlier message
+        to look up. Empty when the message replies to nothing, to the bot (its line quotes the bot
+        instead) or to a topic's first message. The date, not the message id: in a basic group
+        the ids differ from one Telegram account to another."""
+        reply = msg.get("reply_to_message")
+        if not isinstance(reply, Mapping) or reply.get("forum_topic_created"):
+            return ""
+        if self.bot_id is not None and (reply.get("from") or {}).get("id") == self.bot_id:
+            return ""
+        kind = next((k for keys, k in REPLY_KINDS if any(reply.get(x) for x in keys)), "text")
+        when = reply.get("date")
+        of = f" of {_iso(when)}" if type(when) is int and when > 0 else ""
+        return f" (replying to {self.sender(reply)}'s {kind}{of})"
+
     def log_seen(self, chat: int, msg: Mapping, text: str) -> None:
         """A group message that does not call the bot. With `history_scope: all` the chat log
         keeps it, and it goes to the next turn as context marked «[not to you]»."""
@@ -1277,9 +1300,8 @@ class Bot:
         name = self.sender(msg)
         now = int(self.now().timestamp())
         mid = msg.get("message_id")
-        self.kv.add_chat(
-            chat, "user", name, f"{name}: {body}", now, body=body, mid=mid, asked=False
-        )
+        line = f"{name}{self.replied(msg)}: {body}"
+        self.kv.add_chat(chat, "user", name, line, now, body=body, mid=mid, asked=False)
         log.info("group line logged")
 
     def addressed(self, msg: Mapping, text: str, private: bool, role: str) -> str | None:
@@ -1297,7 +1319,7 @@ class Bot:
         if not body:
             return None
         user = (msg.get("from") or {}).get("id")
-        prefix = f"{self.who(role, user)}: "
+        prefix = f"{self.who(role, user)}{self.replied(msg)}: "
         if to_bot:
             quoted = reply.get("text") or reply.get("caption") or ""
             prefix += f"[replying to the bot: {quoted}] "
@@ -1353,6 +1375,7 @@ class Bot:
             "ts": int(self.now().timestamp()),
             "voice": voice,
             "who": self.who(role, user),
+            "replied": self.replied(msg),
             "admin": role == ADMIN,
             "uid": user,
         }
@@ -1401,7 +1424,7 @@ class Bot:
             return
         body = self._strip_mention(msg, str(msg.get("caption") or ""), "caption_entities")[0]
         body = body.strip()
-        content = f"{self.who(role, user)}: [{label}: {name}] {body}".rstrip()
+        content = f"{self.who(role, user)}{self.replied(msg)}: [{label}: {name}] {body}".rstrip()
         file = {"file_id": media["file_id"], "name": name, "mime": mime, "size": size}
         self.queue_text(chat["id"], msg, content, role, body, file=file)
 
@@ -3056,7 +3079,7 @@ class Bot:
         echo = split_text(text, ECHO_MAX)
         shown = echo[0] + ("…" if len(echo) > 1 else "")
         self.post(chat, self.t("voice_echo", text=html.escape(shown)), reply_parameters=note)
-        return f"{line.get('who') or ''}: [voice note] {text}"
+        return f"{line.get('who') or ''}{line.get('replied') or ''}: [voice note] {text}"
 
     def say(
         self,

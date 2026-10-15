@@ -1976,3 +1976,95 @@ def test_validate_settings_is_all_or_nothing():
     ):
         with pytest.raises(ValueError, match=code):
             validate_settings(bad)
+
+
+# --- what a reply points at -------------------------------------------------------------------
+
+SENT = 1_804_000_000  # 2027-03-02T15:06:40+00:00, when the replied message was sent
+WHEN = "2027-03-02T15:06:40+00:00"
+
+
+def replying(bot, reply, user=HER, text="¿la viste?", chat=GROUP, **extra):
+    """A message from `user` replying to `reply`, delivered as Telegram does."""
+    message = {
+        "message_id": next(_ids),
+        "from": {"id": user},
+        "chat": {"id": chat, "type": "supergroup"},
+        "reply_to_message": {"message_id": 7, "date": SENT, **reply},
+        **extra,
+    }
+    if text is not None:
+        message["text"] = text
+    bot.handle({"update_id": 5, "message": message})
+    bot.join_idle()
+    return message
+
+
+@pytest.mark.parametrize(
+    "media, kind",
+    [
+        ({"photo": [{"file_id": "x", "file_size": 9}]}, "photo"),
+        ({"video": {"file_id": "x"}}, "video"),
+        ({"animation": {"file_id": "x"}, "document": {"file_id": "x"}}, "video"),
+        ({"video_note": {"file_id": "x"}}, "video"),
+        ({"voice": {"file_id": "x"}}, "voice"),
+        ({"audio": {"file_id": "x"}}, "voice"),
+        ({"document": {"file_id": "x"}}, "file"),
+        ({"sticker": {"file_id": "x"}}, "file"),
+        ({"text": "mira esto"}, "text"),
+    ],
+)
+def test_a_reply_to_someone_elses_message_says_what_it_points_at(make_bot, media, kind):
+    bot = make_bot(read_all=True)
+    replying(bot, {"from": {"id": ADMIN}, **media})
+    assert plugin(bot).CALLS[0]["turn"]["new"][0]["content"] == (
+        f"Lucía (replying to Marta's {kind} of {WHEN}): ¿la viste?"
+    )
+
+
+def test_the_pointer_names_her_a_stranger_and_goes_without_a_date_it_lacks(make_bot):
+    bot = make_bot(read_all=True)
+    replying(bot, {"from": {"id": HER}, "photo": [{"file_id": "x"}]})
+    replying(bot, {"from": {"id": STRANGER, "first_name": "Pepe"}, "text": "hola", "date": None})
+    got = [c["turn"]["new"][-1]["content"] for c in plugin(bot).CALLS]
+    assert got == [
+        f"Lucía (replying to Lucía's photo of {WHEN}): ¿la viste?",
+        "Lucía (replying to Pepe's text): ¿la viste?",
+    ]
+
+
+def test_a_reply_to_the_bot_or_to_a_topics_first_message_names_no_pointer(make_bot):
+    bot = make_bot(read_all=True)
+    replying(bot, {"from": {"id": BOT_ID}, "photo": [{"file_id": "x"}], "caption": "tu gráfica"})
+    replying(bot, {"from": {"id": ADMIN}, "forum_topic_created": {"name": "Ciclo"}})
+    got = [c["turn"]["new"][-1]["content"] for c in plugin(bot).CALLS]
+    assert got == ["Lucía: [replying to the bot: tu gráfica] ¿la viste?", "Lucía: ¿la viste?"]
+
+
+def test_a_caption_a_voice_note_and_group_talk_say_what_they_reply_to(make_bot):
+    profile = PROFILE.replace(
+        "  admins: {222: Marta}\n", "  admins: {222: Marta}\n  history_scope: all\n"
+    )
+    bot = make_bot(profile=profile)  # privacy on: the photo and the note need no mention
+    mod = plugin(bot)
+    bot.tg.files["p-big"] = b"\xff\xd8 fictional photo"
+    bot.tg.files["v1"] = b"OggS fictional"
+    mod.VOICES[:] = ["¿y esta?"]
+    replying(bot, {"from": {"id": HER}, "text": "me duele"}, user=ADMIN, text="pobre")
+    assert mod.CALLS == []  # an admin's group talk waits as context
+    to_video = {"message_id": 7, "date": SENT, "from": {"id": ADMIN}, "video": {"file_id": "x"}}
+    msg = photo(bot, caption="otra", reply_to_message=to_video)
+    name = f"inbox/{msg['message_id']}-foto.jpg"
+    assert [x["content"] for x in mod.CALLS[-1]["turn"]["new"]] == [
+        f"[not to you] Marta (replying to Lucía's text of {WHEN}): pobre",
+        f"Lucía (replying to Marta's video of {WHEN}): [photo: {name}] otra",
+    ]
+    replying(
+        bot,
+        {"from": {"id": ADMIN}, "document": {"file_id": "x"}},
+        text=None,
+        voice={"file_id": "v1", "duration": 4},
+    )
+    assert mod.CALLS[-1]["turn"]["new"][-1]["content"] == (
+        f"Lucía (replying to Marta's file of {WHEN}): [voice note] ¿y esta?"
+    )
