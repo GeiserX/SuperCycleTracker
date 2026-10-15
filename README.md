@@ -19,7 +19,7 @@ SuperCycleTracker is a menstrual cycle tracker that lives in a Telegram group. I
 - She changes the ask hour from the chat, in words or with `/hora 21:30`; the bot commits the profile change itself.
 - Predicts the next period from the logged history, and says so when a period closes.
 - Imports an Apple Health export to seed the history.
-- In the group it reads replies to the bot, answers to its questions, commands, and messages that mention it when Telegram delivers them; as a group admin it reads all of her messages. Voice notes from her or an admin are always heard, when the plugin can transcribe, and their photos and files of any kind always reach the assistant. It also answers private chats with her or an admin.
+- In the group it reads replies to the bot, answers to its questions, commands, and messages that mention it when Telegram delivers them; as a group admin it reads all of her messages. Voice notes from her or an admin are always heard, when the plugin can transcribe, and their photos, videos, stickers and files of any kind always reach the assistant. It also answers private chats with her or an admin.
 - Works without any AI: buttons and `/anotar` write records directly. An optional assistant plugin reads free text and answers questions.
 - The assistant reads the shared assistant principles first, in English or Spanish (`supercycletracker/principles/`): twelve rules on whom it answers, buttons, offers, privacy and honest results. The bot's own rules in `rules.md` follow them and only add what is specific to tracking a cycle. The files are copied unchanged from the shared text, and a test pins their hashes.
 - A burst of messages gets one answer, and what she writes while it thinks joins that answer. An edited message is taken into account. Choices come as buttons she can tap or ignore, and an action the assistant wants to take waits for Approve or Reject.
@@ -56,7 +56,7 @@ Or with Docker, the data directory mounted at `/data` and owned by uid 1000:
 ```sh
 docker run -d --name supercycletracker \
   -e TELEGRAM_BOT_TOKEN -e SCT_GIT_TOKEN -e TZ=Europe/Madrid \
-  -v "$PWD/data:/data" drumsergio/supercycletracker:0.4.6
+  -v "$PWD/data:/data" drumsergio/supercycletracker:0.4.7
 ```
 
 Only one process may poll a bot token. `sct say` does not poll, so it is safe beside the running bot.

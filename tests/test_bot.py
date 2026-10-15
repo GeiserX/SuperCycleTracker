@@ -1596,6 +1596,46 @@ def test_any_other_file_reaches_the_turn_with_its_own_name(make_bot, file_name, 
     assert bot.tg.texts() == ["Vale."]
 
 
+@pytest.mark.parametrize(
+    ("kind", "media", "name", "mime"),
+    [
+        ("video", {"mime_type": "video/quicktime"}, "video.mov", "video/quicktime"),
+        ("animation", {"mime_type": "video/mp4"}, "animacion.mp4", "video/mp4"),
+        ("video_note", {"length": 240}, "videonota.mp4", "video/mp4"),
+        ("sticker", {"is_animated": False, "is_video": False}, "sticker.webp", "image/webp"),
+        ("sticker", {"is_animated": False, "is_video": True}, "sticker.webm", "video/webm"),
+        (
+            "sticker",
+            {"is_animated": True, "is_video": False},
+            "sticker.tgs",
+            "application/x-tgsticker",
+        ),
+    ],
+)
+def test_videos_gifs_video_notes_and_stickers_reach_the_turn(make_bot, kind, media, name, mime):
+    bot = make_bot()  # privacy on: like a photo, none of them needs a mention
+    mod = plugin(bot)
+    bot.tg.files["m1"] = b"fictional media"
+    extra = {kind: {"file_id": "m1", **media}}
+    if kind == "animation":  # Telegram sends a GIF with a document beside it
+        extra["document"] = {"file_id": "m1", "file_name": "gif.mp4", "mime_type": "video/mp4"}
+    message = {
+        "message_id": next(_ids),
+        "from": {"id": HER},
+        "chat": {"id": GROUP, "type": "supergroup"},
+        **extra,
+    }
+    bot.handle({"update_id": 5, "message": message})
+    bot.join_idle()
+    full = f"inbox/{message['message_id']}-{name}"
+    turn = mod.CALLS[0]["turn"]
+    assert turn["attachments"] == [
+        {"name": full, "mime": mime, "data": b"fictional media", "from": "Lucía"}
+    ]
+    assert turn["new"][0]["content"] == f"Lucía: [file: {full}]"
+    assert bot.tg.texts() == ["Vale."]
+
+
 def test_a_photo_from_a_stranger_or_another_chat_is_ignored(make_bot):
     bot = make_bot(read_all=True)
     bot.tg.files["p-big"] = b"x"
