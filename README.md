@@ -56,7 +56,7 @@ Or with Docker, the data directory mounted at `/data` and owned by uid 1000:
 ```sh
 docker run -d --name supercycletracker \
   -e TELEGRAM_BOT_TOKEN -e SCT_GIT_TOKEN -e TZ=Europe/Madrid \
-  -v "$PWD/data:/data" drumsergio/supercycletracker:0.4.3
+  -v "$PWD/data:/data" drumsergio/supercycletracker:0.4.4
 ```
 
 Only one process may poll a bot token. `sct say` does not poll, so it is safe beside the running bot.

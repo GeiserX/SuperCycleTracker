@@ -3,7 +3,9 @@
 A tap is recorded at once, with no AI: each button carries its date and value, and the next step is
 computed from the log, never from a session table, so a stale keyboard still works and a restart
 mid-card loses nothing. Text meant for the bot is queued in SQLite (`pending:<chat>`) and one worker
-thread runs assistant turns, one at a time, so a tap is answered while the assistant thinks. A voice
+thread runs assistant turns, one at a time, so a tap is answered while the assistant thinks. Telegram's
+offset moves only once a line is written, and a line leaves the queue only once its answer is sent,
+so a restart answers what was queued or in flight (`resume`). A voice
 note from her or an admin is queued the same way and turned into text by the plugin on a hearing
 thread. Slow work a plugin hands back with its answer (`later`) runs on a third thread, one job at a
 time, and a person's answer to an action the assistant wants to take goes back on a fourth.
@@ -1696,7 +1698,7 @@ class Bot:
                 delay = min(delay * 2, BACKOFF_MAX_S)
         self.repo.check_remote()
         self.set_commands()
-        self.resume_notes()
+        self.resume()
         try:
             while not stop.is_set():
                 try:
@@ -2805,11 +2807,17 @@ class Bot:
 
     # --- voice notes (hearing thread) ----------------------------------------------------
 
-    def resume_notes(self) -> None:
-        """At start: voice notes a restart left unheard go to the hearing thread again."""
+    def resume(self) -> None:
+        """At start: what a restart left in `pending:<chat>` is answered now, not when she
+        writes again. Voice notes go to the hearing thread (which queues the turn after them);
+        text lines, queued or taken by a turn that never finished, go to the worker."""
         for key in self.kv.keys("pending:"):
-            if any("voice" in x for x in self.kv.get_json(key, []) or []):
-                self.hearer.submit(int(key.removeprefix("pending:")))
+            chat = int(key.removeprefix("pending:"))
+            lines = self.kv.get_json(key, []) or []
+            if any("voice" in x for x in lines):
+                self.hearer.submit(chat)
+            elif self.has_assistant and any("content" in x for x in lines):
+                self.worker.submit(chat)
 
     def _hear_chat(self, chat: int) -> None:
         """Hear every voice note waiting in the chat, then queue its turn: a note heard while a
