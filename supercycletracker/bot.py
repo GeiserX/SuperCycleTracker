@@ -79,6 +79,15 @@ TEXT_MAX = 4096  # Telegram's limit on one message, in UTF-16 code units
 VOICE_MAX = 20 * 1024 * 1024  # the largest file the Bot API lets a bot download
 FILE_MAX = VOICE_MAX  # a photo or a file, the same limit
 TURN_FILES_MAX = 25 * 1024 * 1024  # the photos and files one turn carries at most
+# the multimedia Telegram sends outside `document`, and the stem of its inbox/ name; voice notes
+# and audio go to the hearing thread instead. An animation also carries a `document`: it goes here.
+MEDIA = {
+    "video": "video",
+    "animation": "animacion",
+    "video_note": "videonota",
+    "sticker": "sticker",
+}
+VIDEO_EXTS = {"video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm"}
 ECHO_MAX = 4000  # the «🎤» echo of a transcript is cut to this, in UTF-16 code units
 ADMIN_STATUSES = frozenset({"administrator", "creator"})  # a group admin gets every message
 NOT_MODIFIED = "message is not modified"
@@ -446,6 +455,19 @@ def _safe_name(name: str, fallback: str) -> str:
     stem = re.sub(r"[^A-Za-z0-9_-]+", "-", stem).strip("-")[:60] or fallback
     ext = re.sub(r"[^A-Za-z0-9]+", "", ext)[:10].lower()
     return f"{stem}.{ext}" if ext else stem
+
+
+def _media_type(kind: str, media: Mapping) -> tuple[str, str]:
+    """The MIME type and extension of a video, an animation, a video note or a sticker. A video
+    note is always MP4; a sticker is WebP, WebM when it is a video, TGS when it is animated."""
+    if kind == "sticker":
+        if media.get("is_animated"):
+            return "application/x-tgsticker", ".tgs"
+        if media.get("is_video"):
+            return "video/webm", ".webm"
+        return "image/webp", ".webp"
+    mime = str(media.get("mime_type") or "video/mp4").lower()
+    return mime, VIDEO_EXTS.get(mime, ".mp4")
 
 
 def _iso(ts: int) -> str:
@@ -1203,7 +1225,7 @@ class Bot:
         if msg.get("voice") or msg.get("audio"):
             self.on_voice(msg)
             return
-        if msg.get("photo") or msg.get("document"):
+        if msg.get("photo") or msg.get("document") or any(msg.get(k) for k in MEDIA):
             self.on_file(msg)
             return
         text = msg.get("text")
@@ -1338,7 +1360,8 @@ class Bot:
         log.info("voice queued")
 
     def on_file(self, msg: Mapping) -> None:
-        """A photo or a file of any kind from her or an admin, in the group or a private chat.
+        """A photo, a video, a GIF, a video note, a sticker or a file of any kind from her or an
+        admin, in the group or a private chat.
         Like a voice note it is always for the bot: a photo of a test or a report dropped in the
         group is meant for it. Its caption is the message. It is queued as a text line naming the
         file, `inbox/<message id>-<name>` with its own name and extension; the turn that takes it
@@ -1358,6 +1381,12 @@ class Bot:
                 return
             media = max(sizes, key=lambda s: (s.get("file_size") or 0, s.get("width") or 0))
             name, mime, label = f"inbox/{mid}-foto.jpg", "image/jpeg", "photo"
+        elif kind := next((k for k in MEDIA if msg.get(k)), None):
+            media = msg[kind]
+            if not isinstance(media, Mapping) or not media.get("file_id"):
+                return
+            mime, ext = _media_type(kind, media)
+            name, label = f"inbox/{mid}-{MEDIA[kind]}{ext}", "file"
         else:
             media = msg["document"]
             if not isinstance(media, Mapping) or not media.get("file_id"):
