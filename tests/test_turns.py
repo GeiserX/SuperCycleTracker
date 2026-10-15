@@ -5,6 +5,7 @@ import itertools
 import threading
 import time
 
+import pytest
 from conftest import (
     ADMIN,
     BOT_ID,
@@ -535,3 +536,64 @@ def test_a_yes_or_no_question_says_she_may_answer_otherwise(make_bot):
         "Toca Sí o No. Si quieres otra cosa, responde a este mensaje. Si no respondes, no hago nada."
     )
     assert "force_reply" not in post["reply_markup"]
+
+
+# --- a restart answers what was queued or in flight ----------------------------------------
+
+
+def _restart(bot, data_repo):
+    """The old process is gone (its threads with it); a new one starts on the same data."""
+    from conftest import FakeTelegram
+
+    from supercycletracker.bot import Bot
+
+    bot.close()
+    new = Bot(data_repo.data, FakeTelegram(), now=bot.now)
+    new.debounce_s = 0
+    new.start()
+    new.resume()
+    new.join_idle()
+    return new
+
+
+def test_a_line_queued_before_a_restart_is_answered_after_it(make_bot, data_repo):
+    bot = make_bot()
+    bot.worker.stop()  # the process dies before the turn starts
+    bot.handle({"message": message("¿me toca ya?")})
+    assert len(bot.kv.get_json(f"pending:{GROUP}")) == 1
+    new = _restart(bot, data_repo)
+    try:
+        calls = plugin(new).CALLS
+        assert len(calls) == 1  # nobody wrote again
+        assert [c.rsplit("] ", 1)[1] for c in contents(calls[0])] == ["¿me toca ya?"]
+        assert new.tg.texts() == ["Vale."]
+        assert new.kv.get_json(f"pending:{GROUP}") is None
+    finally:
+        new.close()
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_a_turn_killed_mid_flight_is_replayed_after_a_restart(make_bot, data_repo):
+    from supercycletracker.bot import Interrupted
+
+    bot = make_bot()
+
+    def dies(*a, **kw):
+        raise Interrupted  # not an Exception: it ends the worker as a SIGKILL ends a process
+
+    bot._converse = dies
+    bot.handle({"message": message("¿me toca ya?")})
+    deadline = time.monotonic() + 5
+    while bot.worker._thread.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not bot.worker._thread.is_alive() and bot.tg.texts() == []
+    assert len(bot.kv.get_json(f"pending:{GROUP}")) == 1  # the input outlived the turn
+    new = _restart(bot, data_repo)
+    try:
+        calls = plugin(new).CALLS
+        assert len(calls) == 1
+        assert [c.rsplit("] ", 1)[1] for c in contents(calls[0])] == ["¿me toca ya?"]
+        assert new.tg.texts() == ["Vale."]
+        assert new.kv.get_json(f"pending:{GROUP}") is None
+    finally:
+        new.close()
