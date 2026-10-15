@@ -7,7 +7,8 @@ thread runs assistant turns, one at a time, so a tap is answered while the assis
 offset moves only once a line is written, and a line leaves the queue only once its answer is sent,
 so a restart answers what was queued or in flight (`resume`). A voice
 note from her or an admin is queued the same way and turned into text by the plugin on a hearing
-thread. Slow work a plugin hands back with its answer (`later`) runs on a third thread, one job at a
+thread. A photo or a PDF from her or an admin is queued as a line naming the file, and the turn
+that takes it downloads it and hands it to the plugin (`turn["attachments"]`). Slow work a plugin hands back with its answer (`later`) runs on a third thread, one job at a
 time, and a person's answer to an action the assistant wants to take goes back on a fourth.
 
 One answer per burst: a turn starts DEBOUNCE_S after the chat's newest message, and waits up to
@@ -76,6 +77,15 @@ EVE_SUMMARY_MIN = 3  # /resumen tells the day-before pattern from this many star
 PAIN_HIGH = 8  # a day crossing into this pain or more posts `pain_high`
 TEXT_MAX = 4096  # Telegram's limit on one message, in UTF-16 code units
 VOICE_MAX = 20 * 1024 * 1024  # the largest file the Bot API lets a bot download
+FILE_MAX = VOICE_MAX  # a photo or a PDF, the same limit
+TURN_FILES_MAX = 25 * 1024 * 1024  # the photos and PDFs one turn carries at most
+# the files the assistant can read, by the extension their inbox/ name gets
+FILE_MIMES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "application/pdf": ".pdf",
+}
 ECHO_MAX = 4000  # the «🎤» echo of a transcript is cut to this, in UTF-16 code units
 ADMIN_STATUSES = frozenset({"administrator", "creator"})  # a group admin gets every message
 NOT_MODIFIED = "message is not modified"
@@ -430,6 +440,14 @@ def _mid(line: Mapping) -> int | None:
 
 def _users(lines: Sequence[Mapping]) -> list[int]:
     return list(dict.fromkeys(x["uid"] for x in lines if x.get("uid")))
+
+
+def _safe_stem(name: str, fallback: str) -> str:
+    """A file name's stem in plain ASCII letters, digits, `-` and `_`, at most 60 of them."""
+    folded = unicodedata.normalize("NFKD", name or "")
+    ascii_ = "".join(c for c in folded if not unicodedata.combining(c))
+    stem = ascii_.rpartition(".")[0] or ascii_
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", stem).strip("-")[:60] or fallback
 
 
 def _iso(ts: int) -> str:
@@ -1187,6 +1205,9 @@ class Bot:
         if msg.get("voice") or msg.get("audio"):
             self.on_voice(msg)
             return
+        if msg.get("photo") or msg.get("document"):
+            self.on_file(msg)
+            return
         text = msg.get("text")
         if not isinstance(text, str) or not text.strip():
             return
@@ -1262,15 +1283,17 @@ class Bot:
             prefix += f"[replying to the bot: {quoted}] "
         return prefix + body
 
-    def _strip_mention(self, msg: Mapping, text: str) -> tuple[str, bool]:
-        """Remove each `mention` entity equal to the bot's @username. Entity offsets count
-        UTF-16 code units, so the text is cut in UTF-16."""
+    def _strip_mention(
+        self, msg: Mapping, text: str, entities: str = "entities"
+    ) -> tuple[str, bool]:
+        """Remove each `mention` entity equal to the bot's @username (`caption_entities` for a
+        caption). Entity offsets count UTF-16 code units, so the text is cut in UTF-16."""
         if not self.username:
             return text, False
         raw = text.encode("utf-16-le")
         target = "@" + self.username.lower()
         spans = []
-        for e in msg.get("entities") or []:
+        for e in msg.get(entities) or []:
             if e.get("type") != "mention":
                 continue
             a, b = 2 * int(e.get("offset", 0)), 2 * int(e.get("offset", 0) + e.get("length", 0))
@@ -1316,6 +1339,47 @@ class Bot:
         self.queue_line(chat["id"], line)
         log.info("voice queued")
 
+    def on_file(self, msg: Mapping) -> None:
+        """A photo, or a document that is an image or a PDF, from her or an admin, in the group or
+        a private chat. Like a voice note it is always for the bot: a photo of a test or of a
+        packet dropped in the group is meant for it. Its caption is the message. It is queued as
+        a text line naming the file, `inbox/<message id>-<name>`; the turn that takes it
+        downloads it (`fetch_files`)."""
+        chat = msg.get("chat") or {}
+        user = (msg.get("from") or {}).get("id")
+        role = self.role(user)
+        if role is None:
+            return
+        if chat.get("type") != "private" and chat.get("id") != self.chat_id:
+            return
+        mid = msg.get("message_id")
+        note = {"message_id": mid, "allow_sending_without_reply": True}
+        if msg.get("photo"):
+            sizes = [s for s in msg["photo"] if isinstance(s, Mapping) and s.get("file_id")]
+            if not sizes:
+                return
+            media = max(sizes, key=lambda s: (s.get("file_size") or 0, s.get("width") or 0))
+            name, mime, label = f"inbox/{mid}-foto.jpg", "image/jpeg", "photo"
+        else:
+            media = msg["document"]
+            mime = str(media.get("mime_type") or "").lower()
+            if mime not in FILE_MIMES or not media.get("file_id"):
+                self.post(chat["id"], self.t("file_kind"), reply_parameters=note)
+                log.info("file refused: kind")
+                return
+            stem = _safe_stem(str(media.get("file_name") or ""), "archivo")
+            name, label = f"inbox/{mid}-{stem}{FILE_MIMES[mime]}", "file"
+        size = media.get("file_size")
+        if isinstance(size, int) and size > FILE_MAX:
+            self.post(chat["id"], self.t("file_too_big"), reply_parameters=note)
+            log.info("file refused: too_big")
+            return
+        body = self._strip_mention(msg, str(msg.get("caption") or ""), "caption_entities")[0]
+        body = body.strip()
+        content = f"{self.who(role, user)}: [{label}: {name}] {body}".rstrip()
+        file = {"file_id": media["file_id"], "name": name, "mime": mime, "size": size}
+        self.queue_text(chat["id"], msg, content, role, body, file=file)
+
     def queue_text(
         self,
         chat: int,
@@ -1324,10 +1388,12 @@ class Bot:
         role: str,
         body: str | None = None,
         row: int | None = None,
+        file: dict | None = None,
     ) -> None:
         """Append a line to `pending:<chat>`, log it in the chat log (or reuse its `row`) and
         queue the chat for the worker. `body` is the message's own words, kept so an edit can be
-        compared with them. Without an assistant: «no_ai» with today's keyboard."""
+        compared with them; `file` is the photo or PDF the line names, fetched when its turn
+        starts. Without an assistant: «no_ai» with today's keyboard."""
         if not self.has_assistant:
             self.post(chat, self.t("no_ai"), self.today_keyboard())
             log.info("text without assistant")
@@ -1354,8 +1420,10 @@ class Bot:
         }
         if body is not None:
             line["body"] = body.strip()
+        if file is not None:
+            line["file"] = file
         self.queue_line(chat, line)
-        log.info("text queued")
+        log.info("file queued" if file is not None else "text queued")
 
     def queue_line(self, chat: int, line: dict) -> None:
         """Append `line` to `pending:<chat>` (the newest 10, none older than 7 days) and queue
@@ -1760,6 +1828,8 @@ class Bot:
         except TelegramError as e:
             log.warning("sendChatAction failed: %s", safe(e))
         started = time.monotonic()
+        lines, atts = self.fetch_files(lines, chat)
+        state.ids = [x["id"] for x in lines]
         now = self.now()
         today = cycle.bot_day(now, p.timezone)
         with self._conv_lock:
@@ -1803,6 +1873,7 @@ class Bot:
                 self.history(
                     chat, now_ts, last_row, {x.get("row") for x in lines} | {r["id"] for r in seen}
                 ),
+                attachments=atts,
             )
             turn["incoming"] = self._incoming(state, key)
             if assistant.asks(self.data, block_cfg.get("plugin")):
@@ -1874,10 +1945,58 @@ class Bot:
             self.later.submit(lambda: self.run_later(chat, job))
             log.info("later queued")
 
+    def fetch_files(self, lines: list[dict], chat: int) -> tuple[list[dict], list[dict]]:
+        """Download the photos and PDFs of the turn's lines, 20 MiB each and 25 MiB in all, as
+        the plugin's attachments `{"name", "mime", "data", "from"}`. A line past the budget
+        waits for the next turn, which is queued; a file that cannot be fetched says so under its
+        message («file_too_big» or «file_failed») and its line goes on without it."""
+        kept, atts, total, held = [], [], 0, False
+        for x in lines:
+            f = x.get("file")
+            if not isinstance(f, Mapping):
+                kept.append(x)
+                continue
+            size = f.get("size") if isinstance(f.get("size"), int) else 0
+            if atts and total + size > TURN_FILES_MAX:
+                held = True
+                continue
+            try:
+                info = self.tg.call("getFile", file_id=f["file_id"])
+                info = info if isinstance(info, Mapping) else {}
+                path = info.get("file_path")
+                if isinstance(info.get("file_size"), int) and info["file_size"] > FILE_MAX:
+                    raise TelegramError("getFile", 413, "file too large")
+                if not isinstance(path, str) or not path:
+                    raise TelegramError("getFile", 0, "no file path")
+                data = self.tg.download(path, FILE_MAX)
+            except TelegramError as e:
+                log.warning("file not fetched: %s", safe(e))
+                too_big = e.code == 413 or "too big" in e.description.lower()
+                note = {"message_id": _mid(x), "allow_sending_without_reply": True}
+                self.post(
+                    chat,
+                    self.t("file_too_big" if too_big else "file_failed"),
+                    reply_parameters=note,
+                )
+                kept.append({**x, "file": None})
+                continue
+            if atts and total + len(data) > TURN_FILES_MAX:
+                held = True
+                continue
+            total += len(data)
+            role = self.role(x.get("uid"))
+            who = self.who(role, x.get("uid")) if role else None
+            atts.append({"name": f["name"], "mime": f["mime"], "data": data, "from": who})
+            kept.append(x)
+        if held:
+            self.worker.submit(chat)
+        return kept, atts
+
     def _incoming(self, state: Turn, key: str) -> Callable[[], list[dict]]:
         """`turn["incoming"]`: the chat's text lines queued since the turn started and not handed
-        over yet, for the plugin's thread. Once the turn is over it hands over nothing, so a late
-        call steals nothing from the next turn."""
+        over yet, for the plugin's thread. A line with a photo or a PDF waits for the next turn,
+        which carries the file. Once the turn is over it hands over nothing, so a late call steals
+        nothing from the next turn."""
 
         def incoming() -> list[dict]:
             with self._q:
@@ -1886,7 +2005,7 @@ class Bot:
                 got = [
                     x
                     for x in self.kv.get_json(key, []) or []
-                    if "content" in x and not state.has(x.get("id"))
+                    if "content" in x and not x.get("file") and not state.has(x.get("id"))
                 ]
                 state.pulled.extend(x["id"] for x in got)
                 state.grants += [

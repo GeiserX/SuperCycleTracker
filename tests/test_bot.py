@@ -513,6 +513,7 @@ def test_a_reply_triggers_a_turn_with_the_contract_shape(make_bot):
         "files",
         "new",
         "history",
+        "attachments",
         "incoming",
         "ask",
     }
@@ -1494,6 +1495,139 @@ def test_a_voice_note_over_20_mib_is_refused(make_bot, monkeypatch):
     voice(bot)
     assert bot.tg.texts()[-1].startswith("Esa nota de voz es muy larga")
     assert mod.HEARD == [] and mod.CALLS == []
+
+
+# --- photos and PDFs -----------------------------------------------------------------------
+
+
+def photo(bot, user=HER, chat=GROUP, caption=None, private=False, document=None, **extra):
+    """A photo (two sizes, the larger last) or, with `document`, a file, as Telegram delivers
+    them: no text, maybe a caption."""
+    message = {
+        "message_id": next(_ids),
+        "from": {"id": user},
+        "chat": {"id": chat, "type": "private" if private else "supergroup"},
+        **extra,
+    }
+    if document is not None:
+        message["document"] = document
+    else:
+        message["photo"] = [
+            {"file_id": "p-small", "file_size": 900, "width": 90},
+            {"file_id": "p-big", "file_size": 9000, "width": 1280},
+        ]
+    if caption is not None:
+        message["caption"] = caption
+    bot.handle({"update_id": 4, "message": message})
+    bot.join_idle()
+    return message
+
+
+def test_a_photo_reaches_the_assistant_with_its_bytes_and_caption(make_bot, caplog):
+    bot = make_bot()  # privacy on: a photo needs no mention, like a voice note
+    mod = plugin(bot)
+    bot.tg.files["p-big"] = b"\xff\xd8 fictional photo"
+    mention = "@example_cycle_bot"
+    with caplog.at_level(logging.INFO):
+        msg = photo(
+            bot,
+            caption=f"{mention} ¿esto es normal?",
+            caption_entities=[{"type": "mention", "offset": 0, "length": len(mention)}],
+        )
+    name = f"inbox/{msg['message_id']}-foto.jpg"
+    assert [c["file_id"] for c in bot.tg.of("getFile")] == ["p-big"]  # the largest size only
+    turn = mod.CALLS[0]["turn"]
+    assert turn["attachments"] == [
+        {"name": name, "mime": "image/jpeg", "data": b"\xff\xd8 fictional photo", "from": "Lucía"}
+    ]
+    assert [x["content"] for x in turn["new"]] == [f"Lucía: [photo: {name}] ¿esto es normal?"]
+    (answer,) = bot.tg.of("sendMessage")
+    assert answer["text"] == "Vale." and under(answer, msg)
+    assert bot.kv.get_json(f"pending:{GROUP}") is None
+    assert "file queued" in caplog.text and "normal" not in caplog.text
+
+
+def test_an_admins_pdf_in_private_is_named_by_its_file(make_bot):
+    bot = make_bot()
+    mod = plugin(bot)
+    bot.tg.files["d1"] = b"%PDF-1.7 fictional"
+    doc = {"file_id": "d1", "file_name": "Análisis de sangre.PDF", "mime_type": "application/pdf"}
+    msg = photo(bot, user=ADMIN, chat=ADMIN, private=True, document=doc)
+    name = f"inbox/{msg['message_id']}-Analisis-de-sangre.pdf"
+    turn = mod.CALLS[0]["turn"]
+    assert [a["name"] for a in turn["attachments"]] == [name]
+    assert turn["attachments"][0]["from"] == "Marta"
+    assert turn["new"][0]["content"] == f"Marta: [file: {name}]"
+
+
+def test_a_file_the_assistant_cannot_read_is_refused_with_file_kind(make_bot):
+    bot = make_bot()
+    doc = {"file_id": "d1", "file_name": "notas.docx", "mime_type": "application/msword"}
+    msg = photo(bot, document=doc)
+    (sent,) = bot.tg.of("sendMessage")
+    assert sent["text"] == "Solo puedo leer fotos y PDF. ¿Me lo mandas como foto o en PDF?"
+    assert under(sent, msg)
+    assert plugin(bot).CALLS == [] and bot.tg.of("getFile") == []
+
+
+def test_a_photo_from_a_stranger_or_another_chat_is_ignored(make_bot):
+    bot = make_bot(read_all=True)
+    bot.tg.files["p-big"] = b"x"
+    photo(bot, user=STRANGER)
+    photo(bot, chat=-100999)
+    photo(bot, user=STRANGER, chat=STRANGER, private=True)
+    assert plugin(bot).CALLS == []
+    assert bot.tg.of("getFile") == [] and bot.tg.texts() == []
+
+
+def test_without_an_assistant_a_photo_gets_no_ai(make_bot):
+    bot = make_bot(profile=PROFILE.split("assistant:")[0])
+    photo(bot)
+    assert bot.tg.texts()[0].startswith("Sin el asistente no entiendo")
+    assert bot.tg.of("getFile") == []
+
+
+def test_a_file_over_20_mib_is_refused_on_arrival(make_bot):
+    bot = make_bot()
+    doc = {"file_id": "d1", "mime_type": "image/png", "file_size": 20 * 1024 * 1024 + 1}
+    msg = photo(bot, document=doc)
+    assert bot.tg.texts() == [
+        "Ese archivo es demasiado grande para mí (hasta 20 MB). ¿Me mandas una foto?"
+    ]
+    assert under(bot.tg.of("sendMessage")[0], msg)
+    assert bot.tg.of("getFile") == [] and plugin(bot).CALLS == []
+
+
+def test_a_photo_that_cannot_be_fetched_says_so_and_the_caption_still_goes(make_bot):
+    bot = make_bot()
+    mod = plugin(bot)  # no bytes for p-big: getFile fails like Telegram does
+    msg = photo(bot, caption="mira esto")
+    failed, answer = bot.tg.of("sendMessage")
+    assert failed["text"] == "No he podido descargar ese archivo. ¿Me lo vuelves a mandar?"
+    assert under(failed, msg)
+    turn = mod.CALLS[0]["turn"]
+    assert turn["attachments"] == []
+    assert turn["new"][0]["content"].endswith("] mira esto")
+    assert answer["text"] == "Vale."
+
+
+def test_photos_past_the_turn_budget_go_with_the_next_turn(make_bot, monkeypatch):
+    monkeypatch.setattr("supercycletracker.bot.TURN_FILES_MAX", 12)
+    bot = make_bot()
+    mod = plugin(bot)
+    bot.tg.files["a"], bot.tg.files["b"] = b"x" * 8, b"y" * 8
+    bot.worker.submit = lambda chat: None  # hold the worker: both lines queue first
+    first = photo(bot, document={"file_id": "a", "mime_type": "image/png", "file_size": 8})
+    second = photo(bot, document={"file_id": "b", "mime_type": "image/png", "file_size": 8})
+    del bot.worker.submit
+    bot.worker.submit(GROUP)
+    bot.join_idle()
+    got = [[a["name"] for a in c["turn"]["attachments"]] for c in mod.CALLS]
+    assert got == [
+        [f"inbox/{first['message_id']}-archivo.png"],
+        [f"inbox/{second['message_id']}-archivo.png"],
+    ]
+    assert bot.kv.get_json(f"pending:{GROUP}") is None
 
 
 def test_a_heard_note_stays_as_text_when_the_turn_fails(make_bot):

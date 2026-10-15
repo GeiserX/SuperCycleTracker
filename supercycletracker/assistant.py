@@ -4,7 +4,9 @@ The plugin is one Python file in the data directory (`profile.yaml` `assistant.p
 never knows which provider sits behind it: it hands over the rules, a fresh `context.md`, the whole
 log and her new lines, and takes back text that may end with one fenced `record` block (and one
 `settings` block). The app, not the assistant, validates and applies those blocks. A plugin may also turn a voice note into text
-(`transcribe`) and hand back slow work to finish after its answer is posted (`later`).
+(`transcribe`) and hand back slow work to finish after its answer is posted (`later`). The photos and
+PDFs of a turn come as `turn["attachments"]`, bytes and all, named by the `inbox/` path their line
+cites.
 
 While a turn runs, the plugin may take the messages that arrived since it started
 (`turn["incoming"]()`) and name in its answer the ones it covered (`covers`); the rest go with the
@@ -345,10 +347,12 @@ def turn(
     log_text: str,
     new: Sequence[str | Mapping],
     history: Sequence[Mapping] = (),
+    attachments: Sequence[Mapping] = (),
 ) -> dict:
     """The dict a plugin's `converse` gets: the new lines oldest first (a line is its text, or
-    `{"content", "ts"}`), and the chat's earlier log as `history` (`{"role", "content", "ts"}`,
-    oldest first) for a provider that has to start the conversation over."""
+    `{"content", "ts"}`), the chat's earlier log as `history` (`{"role", "content", "ts"}`,
+    oldest first) for a provider that has to start the conversation over, and the photos and
+    PDFs the new lines name as `attachments` (`{"name", "mime", "data", "from"}`)."""
     lines = []
     for x in new:
         item = {"role": "user", "content": x if isinstance(x, str) else x["content"]}
@@ -362,6 +366,7 @@ def turn(
         "files": {LOG_KEY: log_text},
         "new": lines,
         "history": [dict(h) for h in history],
+        "attachments": [dict(a) for a in attachments],
     }
 
 
@@ -378,9 +383,10 @@ def rules(
     reach = (
         f"In the group, every message {name} writes reaches you too, because the group is about "
         f"her cycle; the others' messages reach you only when they mention you, reply to you or "
-        f"send a voice note."
+        f"send a voice note, a photo or a PDF."
         if her_text
-        else "Text without a mention or a reply does not reach you as a message."
+        else "Text without a mention or a reply does not reach you as a message; a voice note, "
+        "a photo or a PDF always does."
     )
     values = {
         "name": name,

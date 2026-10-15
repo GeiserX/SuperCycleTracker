@@ -282,6 +282,7 @@ def test_the_turn_has_the_contract_shape():
             {"role": "user", "content": "Marta: dos"},
         ],
         "history": [],
+        "attachments": [],
     }
 
 
