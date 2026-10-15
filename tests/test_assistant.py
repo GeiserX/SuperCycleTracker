@@ -283,7 +283,10 @@ def test_the_turn_has_the_contract_shape():
         ],
         "history": [],
         "attachments": [],
+        "chat": {"id": None, "user": None},
     }
+    named = assistant.turn(None, "R", "C", "", [], chat_id=-100123, user_id=111)
+    assert named["chat"] == {"id": -100123, "user": 111}
 
 
 def test_rules_are_filled_and_keep_the_block_example():

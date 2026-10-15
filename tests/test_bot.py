@@ -514,11 +514,13 @@ def test_a_reply_triggers_a_turn_with_the_contract_shape(make_bot):
         "new",
         "history",
         "attachments",
+        "chat",
         "incoming",
         "ask",
     }
     assert callable(turn["incoming"]) and callable(turn["ask"])
     assert turn["conversation"] is None
+    assert turn["chat"] == {"id": GROUP, "user": HER}
     assert turn["new"] == [
         {
             "role": "user",
@@ -789,6 +791,19 @@ def test_twenty_queued_lines_are_capped_to_ten_and_the_next_turn_succeeds(make_b
     assert new[0]["content"].endswith("mensaje 11")
     assert bot.tg.texts()[-1] == "Vale."
     assert bot.kv.get_json(f"pending:{GROUP}") is None
+
+
+def test_a_turn_names_its_chat_and_the_person_whose_message_started_it(make_bot):
+    bot = make_bot()
+    mod = plugin(bot)
+    mod.DOWN = True
+    say(bot, "ayer tuvo poco", user=ADMIN, reply_to=QUESTION)
+    mod.DOWN = False
+    say(bot, "y hoy nada", reply_to=QUESTION)
+    assert len(mod.CALLS[-1]["turn"]["new"]) == 2
+    assert mod.CALLS[-1]["turn"]["chat"] == {"id": GROUP, "user": ADMIN}
+    say(bot, "hola", chat=HER, private=True)
+    assert mod.CALLS[-1]["turn"]["chat"] == {"id": HER, "user": HER}
 
 
 def test_pending_lines_older_than_seven_days_fall_off(make_bot):
