@@ -28,6 +28,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import re
 import secrets
 import threading
@@ -109,6 +110,9 @@ BACKOFF_MIN_S, BACKOFF_MAX_S = 5, 300  # 5xx and network failures
 MENU = ("hoy", "resumen", "anotar", "hora", "deshacer", "recordatorios", "ayuda")  # the menu
 DEBOUNCE_S = 2.5  # a chat's turn starts this long after its newest message: a burst goes together
 VOICE_WAIT_S = 30  # and waits this long at most, from a note's arrival, for a note being heard
+# A plugin out of capacity raises an error with `retry_after` (seconds): the chat's lines wait that
+# long, at least BUSY_MIN_S, and the next tick after it runs their turn, with nobody writing again.
+BUSY_MIN_S = 60
 SAID_MAX = 30  # answered messages kept per chat, so an edit of one can be compared with it
 ANSWER_CLIP = 1500  # characters of the earlier answer that an edit of an answered message carries
 OPTIONS_TTL_S = 12 * 3600  # a choice under an answer can be tapped this long
@@ -440,6 +444,16 @@ class Turn:
         return line_id in self.ids or line_id in self.pulled
 
 
+def _retry_after(e: BaseException) -> float | None:
+    """The seconds a busy plugin asks to wait (its error's `retry_after`), or None."""
+    later = getattr(e, "retry_after", None)
+    if isinstance(later, bool) or not isinstance(later, (int, float)):
+        return None
+    if not math.isfinite(later) or later <= 0:
+        return None  # NaN or infinity would never end the wait
+    return float(later)
+
+
 def _mid(line: Mapping) -> int | None:
     """The Telegram message a pending line answers to (lines from 0.2 carry only `id`)."""
     if "mid" in line:
@@ -589,6 +603,8 @@ class Bot:
         self._newest: dict[int, float] = {}
         self._voicing: dict[int, dict] = {}  # chat -> {line id: when the note arrived}
         self._running: dict[int, Turn] = {}
+        self._resting: dict[int, float] = {}  # chat -> clock() its turn waits for (busy plugin)
+        self._told_busy: set[int] = set()  # chats told of the wait, until an answer goes out
         self.asks: dict[str, dict] = {}  # the plugin's open asks, by the key on their buttons
         self.hearer = Worker(self._hear_chat, name="sct-hear")
         self.side = Worker(lambda job: job(), name="sct-asks")  # answers to asks, off the poll loop
@@ -1722,6 +1738,7 @@ class Bot:
         except Exception as e:  # noqa: BLE001
             log.warning("ask expiry failed: %s", safe(e))
         for step, what in (
+            (self.wake, "busy wake"),
             (self.tick_reminders, "reminder tick"),
             (self.expire_offers, "offer expiry"),
             (self.expire_options, "options expiry"),
@@ -1850,8 +1867,12 @@ class Bot:
         what arrives while it runs is handed over through `incoming`. On success the text is
         posted, the block applied and the lines it covered removed (the rest stay for the next
         turn). On an exception, a timeout or `kept: false`: «ai_down» with the keyboard, no
-        block, and every line stays for the next turn."""
+        block, and every line stays for the next turn; on an exception with `retry_after`,
+        «ai_busy» once and the turn runs again by itself after the wait (`rest`)."""
         key = f"pending:{chat}"
+        with self._q:
+            if self._resting.get(chat, 0) > self.clock():
+                return  # the plugin is busy: `wake` queues the chat again when the wait is over
         self.settle(chat)
         with self._q:
             lines = [x for x in self.kv.get_json(key, []) or [] if "content" in x]
@@ -1932,6 +1953,10 @@ class Bot:
             )
         except Exception as e:  # noqa: BLE001 - the plugin may raise anything
             log.warning("ai turn failed: %s", safe(e))
+            later = _retry_after(e)
+            if later is not None:  # out of capacity: the lines stay and go again by themselves
+                self.rest(chat, later)
+                return
             self.post(chat, self.t("ai_down"), self.today_keyboard())
             return
         finally:
@@ -1969,6 +1994,8 @@ class Bot:
             # she never saw the answer: a failed turn, so the buttons and the lines stay
             self.post(chat, self.t("ai_down"), self.today_keyboard())
             return
+        with self._q:
+            self._told_busy.discard(chat)  # answered: a later busy spell is told again
         if text:
             self.kv.add_chat(chat, "assistant", None, text, int(self.now().timestamp()))
         if block is not None:
@@ -1993,6 +2020,37 @@ class Bot:
             job = reply.later
             self.later.submit(lambda: self.run_later(chat, job))
             log.info("later queued")
+
+    def rest(self, chat: int, seconds: float) -> None:
+        """The plugin is out of capacity for `seconds`: say so once, with the wait and the keyboard,
+        and run the chat's turn by itself when it is over (`wake`). Its lines stay in
+        `pending:<chat>`, so a restart meanwhile still answers them; what arrives meanwhile waits
+        with them and joins that turn."""
+        seconds = max(float(seconds), BUSY_MIN_S)
+        with self._q:
+            self._resting[chat] = self.clock() + seconds
+            told = chat in self._told_busy
+            self._told_busy.add(chat)
+        log.info("ai busy, retry in %ds", round(seconds))
+        if told:
+            return
+        minutes = max(1, round(seconds / 60))
+        wait = (
+            self.t("busy_minutes", n=minutes)
+            if minutes < 90
+            else self.t("busy_hours", n=round(minutes / 60))
+        )
+        self.post(chat, self.t("ai_busy", wait=wait), self.today_keyboard())
+
+    def wake(self) -> None:
+        """Queue the turn of every chat whose wait for a busy plugin is over."""
+        now = self.clock()
+        with self._q:
+            due = [chat for chat, at in self._resting.items() if at <= now]
+            for chat in due:
+                del self._resting[chat]
+        for chat in due:
+            self.worker.submit(chat)
 
     def fetch_files(self, lines: list[dict], chat: int) -> tuple[list[dict], list[dict]]:
         """Download the photos and files of the turn's lines, 20 MiB each and 25 MiB in all, as

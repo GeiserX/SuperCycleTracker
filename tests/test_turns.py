@@ -597,3 +597,89 @@ def test_a_turn_killed_mid_flight_is_replayed_after_a_restart(make_bot, data_rep
         assert new.kv.get_json(f"pending:{GROUP}") is None
     finally:
         new.close()
+
+
+# --- a plugin out of capacity ----------------------------------------------------------------
+
+
+def busy(seconds):
+    """What a provider with no capacity left raises: an error saying when to try again."""
+    e = RuntimeError("no capacity")
+    e.retry_after = seconds
+    return e
+
+
+def busy_texts(bot):
+    return [x for x in bot.tg.texts() if x.startswith("Ahora no puedo contestar")]
+
+
+def test_a_busy_plugin_is_told_once_and_everything_is_answered_after_the_wait(make_bot):
+    bot = make_bot()
+    now = [1000.0]
+    bot.clock = lambda: now[0]
+    mod = plugin(bot)
+    mod.REPLIES[:] = [busy(3960)]
+    bot.handle({"message": message("me ha bajado")})
+    bot.join_idle()
+    told = sent(bot)[-1]
+    assert told["text"] == bot.t("ai_busy", wait=bot.t("busy_minutes", n=66))
+    assert buttons(told["reply_markup"])[0] == "f:20270304:light"  # she can still use the buttons
+    bot.handle({"message": message("y me duele")})
+    bot.join_idle()
+    assert len(mod.CALLS) == 1  # no call while the plugin is busy
+    assert len(bot.kv.get_json(f"pending:{GROUP}")) == 2  # both wait, on disk
+    bot.tick()
+    bot.join_idle()
+    assert len(mod.CALLS) == 1  # the wait is not over yet
+    now[0] += 3960
+    bot.tick()  # nobody writes again
+    bot.join_idle()
+    assert len(mod.CALLS) == 2
+    assert [c.rsplit("] ", 1)[1] for c in contents(mod.CALLS[1])] == ["me ha bajado", "y me duele"]
+    assert "Vale." in bot.tg.texts()
+    assert len(busy_texts(bot)) == 1
+    assert bot.kv.get_json(f"pending:{GROUP}") is None
+
+
+def test_a_long_busy_spell_says_hours_and_a_longer_wait_is_not_told_again(make_bot):
+    bot = make_bot()
+    now = [1000.0]
+    bot.clock = lambda: now[0]
+    mod = plugin(bot)
+    mod.REPLIES[:] = [busy(3 * 3600), busy(600)]
+    bot.handle({"message": message("¿me toca ya?")})
+    bot.join_idle()
+    assert bot.tg.texts()[-1] == bot.t("ai_busy", wait=bot.t("busy_hours", n=3))
+    now[0] += 3 * 3600
+    bot.wake()
+    bot.join_idle()
+    assert len(mod.CALLS) == 2 and len(busy_texts(bot)) == 1  # still busy: not told twice
+    now[0] += 600
+    bot.wake()
+    bot.join_idle()
+    assert len(mod.CALLS) == 3 and bot.tg.texts()[-1] == "Vale."
+    assert bot.kv.get_json(f"pending:{GROUP}") is None
+
+
+def test_lines_waiting_for_a_busy_plugin_are_answered_after_a_restart(make_bot, data_repo):
+    bot = make_bot()
+    plugin(bot).REPLIES[:] = [busy(3960)]
+    bot.handle({"message": message("¿me toca ya?")})
+    bot.join_idle()
+    assert len(busy_texts(bot)) == 1
+    new = _restart(bot, data_repo)
+    try:
+        calls = plugin(new).CALLS
+        assert [c.rsplit("] ", 1)[1] for c in contents(calls[-1])] == ["¿me toca ya?"]
+        assert new.tg.texts() == ["Vale."]
+        assert new.kv.get_json(f"pending:{GROUP}") is None
+    finally:
+        new.close()
+
+
+@pytest.mark.parametrize("value", [None, True, 0, -5, "60", float("nan"), float("inf")])
+def test_only_a_finite_positive_retry_after_is_a_busy_spell(value):
+    from supercycletracker.bot import _retry_after
+
+    assert _retry_after(busy(value)) is None
+    assert _retry_after(busy(30)) == 30.0
