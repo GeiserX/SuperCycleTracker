@@ -28,6 +28,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import re
 import secrets
 import threading
@@ -446,8 +447,10 @@ class Turn:
 def _retry_after(e: BaseException) -> float | None:
     """The seconds a busy plugin asks to wait (its error's `retry_after`), or None."""
     later = getattr(e, "retry_after", None)
-    if isinstance(later, bool) or not isinstance(later, (int, float)) or later <= 0:
+    if isinstance(later, bool) or not isinstance(later, (int, float)):
         return None
+    if not math.isfinite(later) or later <= 0:
+        return None  # NaN or infinity would never end the wait
     return float(later)
 
 

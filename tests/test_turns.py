@@ -675,3 +675,11 @@ def test_lines_waiting_for_a_busy_plugin_are_answered_after_a_restart(make_bot, 
         assert new.kv.get_json(f"pending:{GROUP}") is None
     finally:
         new.close()
+
+
+@pytest.mark.parametrize("value", [None, True, 0, -5, "60", float("nan"), float("inf")])
+def test_only_a_finite_positive_retry_after_is_a_busy_spell(value):
+    from supercycletracker.bot import _retry_after
+
+    assert _retry_after(busy(value)) is None
+    assert _retry_after(busy(30)) == 30.0
