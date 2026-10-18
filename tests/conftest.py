@@ -91,6 +91,33 @@ def data_repo(_data_repo_template, tmp_path, monkeypatch) -> DataRepo:
     return DataRepo(remote=root / "remote.git", data=root / "data", human=root / "human")
 
 
+@pytest.fixture
+def subfolder_repo(tmp_path, monkeypatch) -> DataRepo:
+    """The data in a folder of a bigger checkout, `tracker/`, next to `doctor/`, which another
+    bot writes from its own clone (`human` here is that clone's root)."""
+    for key, value in ISOLATED.items():
+        monkeypatch.setenv(key, value)
+    root = tmp_path / "repos"
+    root.mkdir()
+    remote, seed = root / "remote.git", root / "seed"
+    git(root, "init", "--quiet", "--bare", "-b", "main", str(remote))
+    git(root, "init", "--quiet", "-b", "main", str(seed))
+    (seed / "tracker" / "cycle").mkdir(parents=True)
+    records.save(seed / "tracker" / "cycle" / "log.jsonl", seed_log())
+    (seed / "tracker" / "cycle" / "profile.yaml").write_text(
+        "name: Example\nlanguage: es\n", encoding="utf-8"
+    )
+    (seed / "tracker" / ".gitignore").write_text("state/\n", encoding="utf-8")
+    (seed / "doctor").mkdir()
+    (seed / "doctor" / "notes.md").write_text("one\n", encoding="utf-8")
+    git(seed, "add", ".")
+    git(seed, "commit", "--quiet", "-m", "seed")
+    git(seed, "push", "--quiet", str(remote), "main")
+    for name in ("bot", "other"):
+        git(root, "clone", "--quiet", "remote.git", name)
+    return DataRepo(remote=remote, data=root / "bot" / "tracker", human=root / "other")
+
+
 class FakeTelegram:
     """Stands in for `Telegram`: records every call, hands out increasing message ids, and
     raises a scripted `TelegramError` on demand. Safe across threads (the worker sends too).

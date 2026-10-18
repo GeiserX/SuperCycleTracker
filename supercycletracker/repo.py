@@ -364,7 +364,7 @@ class Repo:
 
     def _show(self, rev: str) -> str | None:
         """The log's text at `rev`, or None when that revision has no log."""
-        r = self._git("show", f"{rev}:{LOG_FILE}")
+        r = self._git("show", f"{rev}:./{LOG_FILE}")  # `./`: the data may be a folder of the repo
         return r.stdout if r.returncode == 0 else None
 
     def _dirty(self) -> bool:
@@ -527,8 +527,10 @@ class Repo:
 
     def undo(self) -> Change | None:
         """Undo the last check-in. While the log is dirty, restore it from HEAD (the whole
-        uncommitted batch goes, nothing is committed). When it is clean and HEAD is the bot's
-        `log:` commit, restore it from HEAD~1 and commit `undo:`. Otherwise None.
+        uncommitted batch goes, nothing is committed). When it is clean and the last commit is
+        the bot's `log:` commit, restore it from that commit's parent and commit `undo:`.
+        Otherwise None. With the data in a folder of a bigger repo, the last commit is the last
+        one that touched the folder, so another folder's commit on top does not hide it.
 
         Returns a `Change` from the current log to the restored one: the dates that went back.
         """
@@ -537,11 +539,12 @@ class Repo:
             if self._dirty():
                 rev, message = "HEAD", None
             else:
-                head = self._run("log", "-1", "--format=%ae%x00%s", code="log_failed")
-                email, _, subject = head.rstrip("\n").partition("\x00")
+                scope = () if (self.data / ".git").exists() else ("--", ".")
+                head = self._run("log", "-1", "--format=%H%x00%ae%x00%s", *scope, code="log_failed")
+                sha, email, subject = head.rstrip("\n").split("\x00", 2)
                 if email != BOT_EMAIL or not subject.startswith(LOG_PREFIX):
                     return None
-                rev, message = "HEAD~1", UNDO_PREFIX + subject.removeprefix(LOG_PREFIX)
+                rev, message = f"{sha}~1", UNDO_PREFIX + subject.removeprefix(LOG_PREFIX)
             target = self._show(rev)
             if target is not None:
                 self._run("checkout", rev, "--", LOG_FILE, code="checkout_failed")
