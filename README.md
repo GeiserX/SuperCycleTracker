@@ -63,7 +63,7 @@ Only one process may poll a bot token. `sct say` does not poll, so it is safe be
 
 | variable | meaning |
 |---|---|
-| `SCT_DATA` | the data directory (default `/data`) |
+| `SCT_DATA` | the data directory (default `/data`): a checkout, or a folder inside one (mount the whole checkout) |
 | `TELEGRAM_BOT_TOKEN` | the bot token |
 | `SCT_GIT_TOKEN` | a token that can push to the data repository, sent as an `Authorization` header |
 | `TZ` | the container timezone; dates follow `profile.timezone` |

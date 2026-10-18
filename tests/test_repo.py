@@ -482,6 +482,75 @@ def test_undo_on_an_undo_or_a_persons_commit_has_nothing_to_undo(data_repo):
     assert subject(dr.data) == "undo: 2027-03-04"
 
 
+# --- the data in a folder of a bigger checkout ------------------------------------------------
+
+
+def other_bot_writes(dr, text):
+    """The other bot, in its own clone, commits to its own folder and pushes."""
+    git(dr.human, "pull", "--quiet", "--rebase")
+    (dr.human / "doctor" / "notes.md").write_text(text, encoding="utf-8")
+    git(dr.human, "commit", "--quiet", "-am", "doctor: note")
+    git(dr.human, "push", "--quiet")
+
+
+def test_a_data_folder_commits_and_rebases_on_the_other_folders_push(subfolder_repo):
+    dr = subfolder_repo
+    repo, n0 = Repo(dr.data, clock=Clock()), dr.remote_count()
+    tap(repo, flow="medium")
+    other_bot_writes(dr, "two\n")
+    assert repo.flush(force=True) == "pushed"
+    assert dr.remote_count() == n0 + 2
+    assert subject(dr.remote, "main") == "log: 2027-03-04"
+    assert dr.remote_file("tracker/" + LOG_FILE) == dr.log.read_text(encoding="utf-8")
+    assert dr.remote_file("doctor/notes.md") == "two\n"
+    assert (dr.data.parent / "doctor" / "notes.md").read_text() == "two\n"
+
+
+def test_a_data_folder_undoes_its_last_check_in(subfolder_repo):
+    dr = subfolder_repo
+    repo = Repo(dr.data, clock=Clock())
+    seed = dr.log.read_text(encoding="utf-8")
+    tap(repo, flow="medium", pain=3)
+    assert repo.flush(force=True) == "pushed"
+    change = repo.undo()
+    assert change.dates == (DAY,)
+    assert subject(dr.data.parent) == "undo: 2027-03-04"
+    assert dr.log.read_text(encoding="utf-8") == seed
+
+
+def test_a_data_folder_undoes_a_check_in_under_the_other_folders_commit(subfolder_repo):
+    dr, clock = subfolder_repo, Clock()
+    repo = Repo(dr.data, clock=clock)
+    seed = dr.log.read_text(encoding="utf-8")
+    tap(repo, flow="medium", pain=3)
+    assert repo.flush(force=True) == "pushed"
+    other_bot_writes(dr, "two\n")
+    clock.advance(3600)
+    assert repo.flush() == "pulled"
+    assert subject(dr.data.parent) == "doctor: note"  # HEAD is not the bot's check-in
+    change = repo.undo()
+    assert change.dates == (DAY,)
+    assert dr.log.read_text(encoding="utf-8") == seed
+    assert repo.flush(force=True) == "pushed"
+    assert subject(dr.remote, "main") == "undo: 2027-03-04"
+    assert dr.remote_file("doctor/notes.md") == "two\n"
+    assert repo.undo() is None  # the last commit in the folder is `undo:`
+
+
+def test_a_data_folder_fails_as_a_conflict_when_its_log_is_deleted_on_the_remote(subfolder_repo):
+    dr = subfolder_repo
+    repo = Repo(dr.data, clock=Clock())
+    tap(repo, flow="heavy")
+    git(dr.human, "rm", "--quiet", "tracker/" + LOG_FILE)
+    git(dr.human, "commit", "--quiet", "-m", "remove the log")
+    git(dr.human, "push", "--quiet")
+    assert repo.flush(force=True) == "failed"
+    assert repo.last_error == "pull_conflict"
+    assert not rebasing(dr.data)
+    assert repo.unpushed() == 1
+    assert records.load(dr.log)[DAY].flow == "heavy"
+
+
 def test_commit_messages_carry_dates_only(data_repo):
     dr = data_repo
     repo = Repo(dr.data, clock=Clock())

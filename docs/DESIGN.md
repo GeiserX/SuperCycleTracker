@@ -1220,7 +1220,7 @@ README.md  AGENTS.md
 
 | variable | meaning |
 |---|---|
-| `SCT_DATA` | the data directory (default `/data`), a git checkout of the private data repository |
+| `SCT_DATA` | the data directory (default `/data`), a git checkout of the private data repository, or a folder inside one (mount the whole checkout) |
 | `TELEGRAM_BOT_TOKEN` | the bot token |
 | `SCT_GIT_TOKEN` | a token with write access to the data repository, sent as an `Authorization` header on pull and push |
 | `TZ` | the container timezone; the app uses `profile.timezone` for every date |
