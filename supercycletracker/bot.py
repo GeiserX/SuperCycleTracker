@@ -44,7 +44,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
-from supercycletracker import assistant, cycle, records
+from supercycletracker import __version__, assistant, cycle, records
 from supercycletracker.i18n import Translator
 from supercycletracker.records import SYMPTOMS, BlockError, Change, Day, Edit, Log
 from supercycletracker.repo import DATA_LOCK, KV, STATE_DB, GitError, Repo
@@ -639,6 +639,24 @@ class Bot:
             log.warning("getChatMember failed: %s", safe(e))
             return False
         return isinstance(member, Mapping) and member.get("status") in ADMIN_STATUSES
+
+    def announce_version(self, version: str = __version__) -> None:
+        """Tell the admins in private, or the group when the profile names none, that a new
+        version runs. The version is kept in the KV only once Telegram took at least one message,
+        so a failed send is tried again at the next start and a restart on the same version
+        says nothing."""
+        previous = self.kv.get("announced_version")
+        if previous == version:
+            return
+        if previous:
+            text = self.t("version_new_from", version=version, previous=previous)
+        else:
+            text = self.t("version_new", version=version)
+        chats = list(self.profile.admins) or [self.chat_id]
+        sent = [c for c in chats if c is not None and self.post(c, text) is not None]
+        if sent:
+            self.kv.set("announced_version", version)
+            log.info("version %s announced to %d chat(s)", version, len(sent))
 
     def set_commands(self) -> None:
         """The menu: one `setMyCommands` in the default scope with the five she uses. The admin
@@ -1831,6 +1849,7 @@ class Bot:
                 delay = min(delay * 2, BACKOFF_MAX_S)
         self.repo.check_remote()
         self.set_commands()
+        self.announce_version()
         self.resume()
         try:
             while not stop.is_set():

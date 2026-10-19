@@ -1078,7 +1078,8 @@ with the same `{placeholders}`; every Spanish string containing `?` also contain
 - `<data>/state/sct.sqlite` is git-ignored. One table `kv(key TEXT PRIMARY KEY, value TEXT)` holding
   exactly: `offset`, `last_ask`, `conv:<chat>`, `pending:<chat>`, `said:<chat>`, `options:<chat>`,
   `remind:<chat>` (the reminder and plan offers waiting for a tap), `ctx:<chat>` (the last group line
-  a kept turn took), `calplan`, `skip:<date>`, `migrated_chat`; any other key is refused. Two more
+  a kept turn took), `calplan`, `skip:<date>`, `migrated_chat`, `announced_version`; any other key
+  is refused. Two more
   tables: `chat`, the chat log (5.2), and `reminder`, the reminders set from the chat (5.6).
   Everything else (`/estado` facts, what was already said, undo) is read from git, the log or the
   `Change`. The connection is opened with `check_same_thread=False` behind one lock, since the worker
@@ -1103,6 +1104,10 @@ with the same `{placeholders}`; every Spanish string containing `?` also contain
 - At start the bot reads `getMe.can_read_all_group_messages`, then `getChatMember(chat_id=<group>,
   user_id=<bot id>)`; either one (privacy mode off, or status `administrator`/`creator`) turns on the
   privacy-off rule (4.3), and the log line says which.
+- After the menu, a version the KV's `announced_version` does not hold yet is announced in private to
+  each admin of the profile (the group when it names none): «Nueva versión en marcha: 0.6.0 (antes
+  0.5.0).». The version is stored once Telegram took at least one of those messages, so a failed send
+  is tried again at the next start and a restart on the same version says nothing.
 - `download(file_path, limit)` fetches a file `getFile` returned from
   `https://api.telegram.org/file/bot<token>/<file_path>`. Like `call`, its errors are
   `TelegramError("download", code, description)` with no URL in them; more than `limit` bytes raises
