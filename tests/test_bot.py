@@ -1412,10 +1412,19 @@ def test_a_new_version_names_the_one_before(make_bot):
 def test_a_failed_announcement_is_not_stored_and_goes_out_at_the_next_start(make_bot):
     bot = make_bot()
     bot.tg.fail_next("sendMessage", 403, "Forbidden: bot can't initiate conversation with a user")
+    bot.tg.fail_next("sendMessage", 502, "Bad Gateway")
     bot.announce_version("1.2.3")
     assert bot.kv.get("announced_version") is None
     bot.announce_version("1.2.3")
-    assert bot.tg.texts() == ["Nueva versión en marcha: 1.2.3."] * 2  # refused, then taken
+    assert [m["chat_id"] for m in bot.tg.of("sendMessage")] == [ADMIN, GROUP, ADMIN]
+    assert bot.kv.get("announced_version") == "1.2.3"
+
+
+def test_an_admin_the_bot_cannot_reach_in_private_gets_it_in_the_group(make_bot):
+    bot = make_bot()
+    bot.tg.fail_next("sendMessage", 403, "Forbidden: bot can't initiate conversation with a user")
+    bot.announce_version("1.2.3")
+    assert [m["chat_id"] for m in bot.tg.of("sendMessage")] == [ADMIN, GROUP]
     assert bot.kv.get("announced_version") == "1.2.3"
 
 
