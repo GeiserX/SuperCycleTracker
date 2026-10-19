@@ -46,7 +46,7 @@ DERIVE_PREFIX = "derive: "  # flags moved by a pull; not a check-in, so never un
 
 # --- SQLite kv -----------------------------------------------------------------------------
 
-KV_KEYS = frozenset({"offset", "last_ask", "migrated_chat", "calplan"})
+KV_KEYS = frozenset({"offset", "last_ask", "migrated_chat", "calplan", "announced_version"})
 KV_PREFIXES = ("conv:", "pending:", "skip:", "said:", "options:", "ctx:", "remind:")
 CHAT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS chat (
@@ -66,8 +66,9 @@ class KV:
     `pending:<chat>`, `said:<chat>` (the last answered messages, so an edit can be compared),
     `options:<chat>` (the choices under recent answers), `remind:<chat>` (reminders and calendar
     entries offered with buttons), `ctx:<chat>` (the last chat log row a turn took as context),
-    `calplan` (the calendar entries last offered), `skip:<date>` and `migrated_chat`; any other
-    key is refused, so nothing else about the cycle can creep into a second store.
+    `calplan` (the calendar entries last offered), `skip:<date>`, `migrated_chat` and
+    `announced_version` (the last version the admins were told of); any other key is refused,
+    so nothing else about the cycle can creep into a second store.
 
     Two more tables: `chat`, the chat log (every message of the chats the bot serves that it
     keeps, and its answers, for the assistant's recap), and `reminder`, the one-off reminders set

@@ -16,7 +16,7 @@ from conftest import (
     seed_log,
 )
 
-from supercycletracker import assistant, cycle, records
+from supercycletracker import __version__, assistant, cycle, records
 from supercycletracker.bot import (
     TEXT_MAX,
     Bot,
@@ -1383,6 +1383,60 @@ def test_run_stops_on_a_bad_token(make_bot):
     bot.tg.fail_next("getMe", 401, "Unauthorized")
     with pytest.raises(TelegramError):
         bot.run(threading.Event())
+
+
+def test_the_first_start_announces_the_version_to_each_admin_in_private(make_bot):
+    bot = make_bot()
+    bot.announce_version("1.2.3")
+    assert [(m["chat_id"], m["text"]) for m in bot.tg.of("sendMessage")] == [
+        (ADMIN, "Nueva versión en marcha: 1.2.3.")
+    ]
+    assert bot.kv.get("announced_version") == "1.2.3"
+
+
+def test_a_restart_on_the_same_version_says_nothing(make_bot):
+    bot = make_bot()
+    bot.announce_version("1.2.3")
+    bot.announce_version("1.2.3")
+    assert len(bot.tg.of("sendMessage")) == 1
+
+
+def test_a_new_version_names_the_one_before(make_bot):
+    bot = make_bot()
+    bot.announce_version("1.2.3")
+    bot.announce_version("1.3.0")
+    assert bot.tg.texts()[-1] == "Nueva versión en marcha: 1.3.0 (antes 1.2.3)."
+    assert bot.kv.get("announced_version") == "1.3.0"
+
+
+def test_a_failed_announcement_is_not_stored_and_goes_out_at_the_next_start(make_bot):
+    bot = make_bot()
+    bot.tg.fail_next("sendMessage", 403, "Forbidden: bot can't initiate conversation with a user")
+    bot.announce_version("1.2.3")
+    assert bot.kv.get("announced_version") is None
+    bot.announce_version("1.2.3")
+    assert bot.tg.texts() == ["Nueva versión en marcha: 1.2.3."] * 2  # refused, then taken
+    assert bot.kv.get("announced_version") == "1.2.3"
+
+
+def test_with_no_admins_the_announcement_goes_to_the_group(make_bot):
+    bot = make_bot(profile=PROFILE.replace("  admins: {222: Marta}\n", ""))
+    bot.announce_version("1.2.3")
+    assert [m["chat_id"] for m in bot.tg.of("sendMessage")] == [GROUP]
+
+
+def test_run_announces_the_running_version_once(make_bot):
+    bot = make_bot()
+    bot.repo.flush = lambda force=False: "idle"
+    stop = threading.Event()
+
+    def interrupted():
+        stop.set()
+        raise Interrupted
+
+    bot.tg.updates = [interrupted]
+    bot.run(stop)
+    assert bot.tg.texts() == [f"Nueva versión en marcha: {__version__}."]
 
 
 # --- voice notes ---------------------------------------------------------------------------
