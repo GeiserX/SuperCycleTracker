@@ -641,10 +641,11 @@ class Bot:
         return isinstance(member, Mapping) and member.get("status") in ADMIN_STATUSES
 
     def announce_version(self, version: str = __version__) -> None:
-        """Tell the admins in private, or the group when the profile names none, that a new
-        version runs. The version is kept in the KV only once Telegram took at least one message,
-        so a failed send is tried again at the next start and a restart on the same version
-        says nothing."""
+        """Tell the admins in private that a new version runs, or the group when the profile
+        names none or Telegram refuses every private message (an admin who never opened a
+        private chat with the bot gets 403). The version is kept in the KV only once Telegram
+        took a message, so a failed send is tried again at the next start and a restart on the
+        same version says nothing."""
         previous = self.kv.get("announced_version")
         if previous == version:
             return
@@ -652,8 +653,9 @@ class Bot:
             text = self.t("version_new_from", version=version, previous=previous)
         else:
             text = self.t("version_new", version=version)
-        chats = list(self.profile.admins) or [self.chat_id]
-        sent = [c for c in chats if c is not None and self.post(c, text) is not None]
+        sent = [a for a in self.profile.admins if self.post(a, text) is not None]
+        if not sent and self.chat_id is not None and self.post(self.chat_id, text) is not None:
+            sent = [self.chat_id]
         if sent:
             self.kv.set("announced_version", version)
             log.info("version %s announced to %d chat(s)", version, len(sent))

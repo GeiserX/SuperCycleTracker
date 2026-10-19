@@ -1105,9 +1105,10 @@ with the same `{placeholders}`; every Spanish string containing `?` also contain
   user_id=<bot id>)`; either one (privacy mode off, or status `administrator`/`creator`) turns on the
   privacy-off rule (4.3), and the log line says which.
 - After the menu, a version the KV's `announced_version` does not hold yet is announced in private to
-  each admin of the profile (the group when it names none): «Nueva versión en marcha: 0.6.0 (antes
-  0.5.0).». The version is stored once Telegram took at least one of those messages, so a failed send
-  is tried again at the next start and a restart on the same version says nothing.
+  each admin of the profile: «Nueva versión en marcha: 0.6.0 (antes 0.5.0).». It goes to the group
+  when the profile names no admin or Telegram refuses every private message (403 for an admin who never
+  opened a private chat with the bot). The version is stored once Telegram took a message, so a failed
+  send is tried again at the next start and a restart on the same version says nothing.
 - `download(file_path, limit)` fetches a file `getFile` returned from
   `https://api.telegram.org/file/bot<token>/<file_path>`. Like `call`, its errors are
   `TelegramError("download", code, description)` with no URL in them; more than `limit` bytes raises
