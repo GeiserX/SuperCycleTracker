@@ -1,4 +1,4 @@
-FROM python:3.14.8-slim
+FROM python:3.15.0-slim
 COPY --from=ghcr.io/astral-sh/uv:0.12.19 /uv /bin/uv
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
