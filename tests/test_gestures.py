@@ -67,6 +67,18 @@ def test_answer_goes_as_html_and_a_refused_markup_as_plain_text(make_bot):
     assert sent(bot)[-1]["text"] == "**Otra** vez." and "parse_mode" not in sent(bot)[-1]
 
 
+def test_a_long_answer_comes_out_short_with_the_detail_folded(make_bot):
+    bot = make_bot()
+    detail = "\n".join(f"- Día {i}: flujo, dolor y ánimo de ese día" for i in range(40))
+    plugin(bot).REPLIES[:] = ["Este ciclo va como los anteriores.\n\n" + detail + "\n\n¿Lo apunto?"]
+    say(bot, "¿cómo voy?", reply_to=QUESTION)
+    msg = sent(bot)[-1]
+    shown, folded = msg["text"].split("<blockquote expandable>")
+    assert shown.strip() == "Este ciclo va como los anteriores."
+    assert "Día 39" in folded
+    assert msg["reply_markup"] == {"force_reply": True, "selective": True}
+
+
 def test_a_reaction_alone_says_nothing_and_a_failed_one_says_the_emoji(make_bot):
     bot = make_bot()
     plugin(bot).REPLIES[:] = ["```telegram\nreact: ❤️\n```"]

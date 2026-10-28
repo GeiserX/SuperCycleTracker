@@ -244,8 +244,15 @@ def sticker_for(sticker_set, emoji):
 GUIDE = {
     "en": """## How your answers look in Telegram
 
-Write light Markdown; the bot turns it into Telegram formatting. Short summary first, then the detail.
-Never a wall of text: short paragraphs, a blank line between them, lists for anything listed.
+Be brief. Answer with the short version: a few lines, five at most, what the person needs now. Long
+text in a chat overwhelms; the detail belongs somewhere else:
+- When the bot has web pages (your rules list them), link the page that holds the detail (the day,
+  the recipe, the plan, the list) instead of writing it out.
+- With no page for it, put the detail in a fold (below), or in a file when it is meant to be kept.
+- An answer longer than a few lines is folded by the bot after its first lines anyway.
+
+Write light Markdown; the bot turns it into Telegram formatting. Short paragraphs, a blank line
+between them, lists for anything listed.
 - **bold** for what matters most, _italic_, ++underline++, ~~struck out~~, ||spoiler|| (hidden until
   tapped), `code`, [text](https://...) links, `# Heading` (shown bold), `- ` lists, `> ` quotes.
 - Detail most people skip (the reasoning, the full list, the sources) goes in a fold, which the chat
@@ -271,9 +278,15 @@ Never a wall of text: short paragraphs, a blank line between them, lists for any
 {voice}""",
     "es": """## Cómo se ven tus respuestas en Telegram
 
-Escribe Markdown ligero; el bot lo convierte al formato de Telegram. Primero un resumen corto, luego
-el detalle. Nunca un muro de texto: párrafos cortos, una línea en blanco entre ellos, listas para lo
-que sea una lista.
+Sé breve. Responde con la versión corta: unas pocas líneas, cinco como mucho, lo que la persona
+necesita ahora. Un texto largo en un chat abruma; el detalle va en otro sitio:
+- Si el bot tiene páginas web (tus reglas las listan), enlaza la página que tiene el detalle (el día,
+  la receta, el plan, la lista) en vez de escribirlo.
+- Si no hay página para ello, pon el detalle plegado (abajo), o en un archivo si es para guardarlo.
+- Una respuesta de más de unas líneas, el bot la pliega igualmente tras las primeras.
+
+Escribe Markdown ligero; el bot lo convierte al formato de Telegram. Párrafos cortos, una línea en
+blanco entre ellos, listas para lo que sea una lista.
 - **negrita** para lo más importante, _cursiva_, ++subrayado++, ~~tachado~~, ||spoiler|| (oculto hasta
   que lo tocan), `código`, enlaces [texto](https://...), `# Título` (sale en negrita), listas con `- `,
   citas con `> `.

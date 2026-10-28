@@ -10,6 +10,8 @@ own, and markup that would cross another tag stays as written:
 - a ```fold block: an expandable quote, folded to its first lines until it is tapped, for the detail
   most readers skip. Inside it the same inline markup, bullets and headings; no code block, no quote.
 
+`brief` keeps an answer to a few lines: past BRIEF characters, the rest goes in a fold.
+
 NUL characters are removed. Telegram's own parser is the last word: a chunk it still refuses is sent
 again as plain text by the caller, so an answer is never lost to its formatting. Stdlib only, and it
 imports nothing else, so a bot that cannot depend on this package can carry a copy of this file.
@@ -19,6 +21,7 @@ import html
 import re
 
 LIMIT = 3500  # under Telegram's 4096 characters per message, with room for the markup
+BRIEF = 700  # what an answer shows before the rest is folded: a few lines on a phone
 
 _TAGS = r"b|i|u|s|tg-spoiler"
 _BODY = (
@@ -114,6 +117,25 @@ def _open_fence(text):
         keep = info.lower() == "fold" or _LANG.fullmatch(info)
         opened = None if opened is not None else "```" + (info if keep else "")
     return opened
+
+
+def brief(md, limit=BRIEF):
+    """`md` as a few lines: past `limit` characters, the rest goes in a ```fold block, cut at a blank
+    line (else a line end), so a long answer reads short and its detail is one tap away. Left as
+    written when it is short, when it holds a fenced block, when a `>` quote comes after the cut (a
+    fold holds neither), or when no line end falls within `limit`."""
+    text = md.strip()
+    if len(text) <= limit or "```" in text:
+        return text
+    cut = text.rfind("\n\n", 0, limit)  # the last paragraph that fits, however short the head
+    if cut <= 0:
+        cut = text.rfind("\n", 0, limit)
+    if cut <= 0:
+        return text
+    head, rest = text[:cut].rstrip(), text[cut:].strip()
+    if not rest or re.search(r"(?m)^>", rest):
+        return text
+    return f"{head}\n```fold\n{rest}\n```"
 
 
 def split(text, limit=LIMIT):
