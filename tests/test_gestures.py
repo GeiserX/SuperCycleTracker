@@ -109,5 +109,14 @@ def test_a_sticker_needs_the_profiles_set_and_the_voice_reaches_the_rules(make_b
 
 
 def test_the_voice_and_switches_come_from_the_profile():
-    p = Profile.from_dict({"name": "x", "telegram": {"style": 3, "photos": "yes"}})
-    assert (p.style, p.sticker_set, p.photos) == ("", "", False)
+    p = Profile.from_dict({"name": "x", "telegram": {"style": 3, "photo_hosts": "a.org"}})
+    assert (p.style, p.sticker_set, p.photo_hosts) == ("", "", ())
+    p = Profile.from_dict({"name": "x", "telegram": {"photo_hosts": ["a.org", 3, ""]}})
+    assert p.photo_hosts == ("a.org",)
+
+
+def test_a_file_with_no_latin_letter_is_named_in_the_chats_language(make_bot):
+    bot = make_bot()
+    plugin(bot).REPLIES[:] = ["Toma.\n```document 日本.txt\nx\n```"]
+    say(bot, "hola", reply_to=QUESTION)
+    assert bot.tg.of("sendDocument")[0]["document"] == "archivo.txt"

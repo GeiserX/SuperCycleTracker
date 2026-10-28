@@ -17,12 +17,15 @@ text and returns what they ask for, checked and capped, so the text the chat see
   answer that is only a reaction sends no text: that is the "ok" a person would give.
 - `sticker`: an emoji; the bot sends the sticker of its own set (its settings) with that emoji, and
   nothing when it has no set or the set has none with it.
-- `photo`: an https URL Telegram fetches itself, with an optional caption; only for a bot whose
-  settings allow photos. At most PHOTOS_MAX.
+- `photo`: an https URL Telegram fetches itself, with an optional caption, only on a host the bot's
+  settings list (`photo_hosts`, a host or any of its subdomains). Telegram fetches it with no tap, so
+  an open list would let text the model read (a web page, a file) send the chat's data to any server
+  in the URL; with no hosts there are no photos. At most PHOTOS_MAX.
 - a `document` block (three or more backticks, closed by as many at the start of a line, so a code
   block inside it stays in it): its text sent as a file named as given, for what is long or meant to
-  be kept (a list, a recipe, a report). Names are cut to letters, digits, `.`, `-` and `_`, with an
-  extension of DOC_TYPES; at most DOCS_MAX, DOC_BYTES each.
+  be kept (a list, a recipe, a report). Names lose their accents and are cut to letters, digits, `-`
+  and `_` (the caller's `fallback` word when nothing is left), with an extension of DOC_TYPES; at most
+  DOCS_MAX, DOC_BYTES each.
 
 Anything else in a block, and anything over a limit, is dropped without a word. The bot sends the text
 first and each of these after it on its own, so a reaction or a file Telegram refuses never loses the
@@ -31,6 +34,7 @@ it imports nothing else, so a bot that cannot depend on this package can carry a
 """
 
 import re
+import unicodedata
 
 PHOTOS_MAX = 3
 DOCS_MAX = 3
@@ -150,36 +154,41 @@ def _caption(text):
     return text[:CAPTION_CHARS] or None
 
 
-def _url(value):
+def _url(value, hosts):
+    """`value` when it is a plain https URL on one of `hosts` (or a subdomain of one), else None."""
     value = value.strip()
+    host = value.split("/")[2].lower() if value.count("/") >= 2 else ""
     if (
         not value.startswith("https://")
         or len(value) > URL_CHARS
         or re.search(r"[\s<>\"'\\\x00-\x1f\x7f]", value)
-        or "@" in value.split("/")[2]
+        or not re.fullmatch(r"[a-z0-9.-]+", host)
+        or not any(host == h or host.endswith("." + h) for h in hosts)
     ):
         return None
     return value
 
 
-def filename(raw):
-    """A safe file name from what the model wrote, or None when no allowed extension is left."""
+def filename(raw, fallback="file"):
+    """A safe file name from what the model wrote («Menú semana.md» is «Menu-semana.md»), `fallback`
+    as its stem when no letter or digit is left, or None when no allowed extension is left."""
     name = raw.strip().replace("\\", "/").rsplit("/", 1)[-1]
     stem, dot, ext = name.rpartition(".")
     ext = ext.lower()
     if not dot or ext not in DOC_TYPES:
         return None
+    stem = unicodedata.normalize("NFKD", stem).encode("ascii", "ignore").decode()
     stem = re.sub(r"[^A-Za-z0-9_-]+", "-", stem).strip("-.")[: NAME_CHARS - len(ext) - 1]
-    return f"{stem or 'archivo'}.{ext}"
+    return f"{stem or fallback}.{ext}"
 
 
-def _documents(text):
+def _documents(text, fallback):
     docs = []
 
     def take(m):
         head, body = m.group(2), m.group(3)
         name, _, caption = head.partition("|")
-        name = filename(name)
+        name = filename(name, fallback)
         data = body.encode("utf-8")
         if name and body.strip() and len(data) <= DOC_BYTES and len(docs) < DOCS_MAX:
             docs.append(
@@ -195,12 +204,14 @@ def _documents(text):
     return _DOC.sub(take, text), docs
 
 
-def extract(text):
-    """The answer without its blocks, and what they ask for:
+def extract(text, photo_hosts=(), fallback="file"):
+    """The answer without its blocks, and what they ask for (photos only on `photo_hosts`; a file
+    whose name has no letter left is named `fallback`, a word in the chat's language):
     {"react": emoji | None, "sticker": emoji | None, "photos": [{"url", "caption"}],
      "documents": [{"name", "data" (bytes), "mime", "caption"}]}."""
     found = {"react": None, "sticker": None, "photos": [], "documents": []}
-    text, found["documents"] = _documents(text.replace("\x00", ""))
+    text, found["documents"] = _documents(text.replace("\x00", ""), fallback)
+    hosts = [h.strip().lower() for h in photo_hosts if h and h.strip()]
     for block in _BLOCK.findall(text):
         for line in block.splitlines():
             key, sep, value = line.strip().lstrip("-*• ").partition(":")
@@ -214,7 +225,7 @@ def extract(text):
                 found["sticker"] = _emoji(value)
             elif key == "photo" and len(found["photos"]) < PHOTOS_MAX:
                 url, _, caption = value.partition(" | ")
-                url = _url(url)
+                url = _url(url, hosts)
                 if url and all(p["url"] != url for p in found["photos"]):
                     found["photos"].append({"url": url, "caption": _caption(caption)})
     text = _BLOCK.sub("\n", text)
@@ -294,16 +305,18 @@ _STICKER = {
     "es": "sticker: 🎉   (un sticker del bot con ese emoji)\n  ",
 }
 _PHOTO = {
-    "en": "photo: https://... | caption   (an image from the web, by its address)\n  ",
-    "es": "photo: https://... | pie   (una imagen de la web, por su dirección)\n  ",
+    "en": "photo: https://... | caption   (an image by its address, only from {hosts})\n  ",
+    "es": "photo: https://... | pie   (una imagen por su dirección, solo de {hosts})\n  ",
 }
 _VOICE = {"en": "\n### Your voice in this chat\n\n", "es": "\n### Tu voz en este chat\n\n"}
 
 
-def guide(lang="en", voice="", stickers=False, photos=False):
+def guide(lang="en", voice="", stickers=False, photo_hosts=()):
     """The model's instructions for all of the above, in `lang` (English when it has none): the sticker
     and photo lines only when the bot can send them, and the bot's own `voice` (its settings) last."""
     lang = lang if lang in GUIDE else "en"
-    extras = (_STICKER[lang] if stickers else "") + (_PHOTO[lang] if photos else "")
+    hosts = ", ".join(h.strip() for h in photo_hosts if h and h.strip())
+    photo = _PHOTO[lang].replace("{hosts}", hosts) if hosts else ""
+    extras = (_STICKER[lang] if stickers else "") + photo
     tail = _VOICE[lang] + voice.strip() + "\n" if voice and voice.strip() else ""
     return GUIDE[lang].replace("{extras}", extras).replace("{voice}", tail).strip() + "\n"

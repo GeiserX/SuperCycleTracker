@@ -169,7 +169,10 @@ class Profile:
     calendar: Mapping = field(default_factory=dict)
     style: str = ""  # the bot's voice in the chat, read after the formatting guide (gestures)
     sticker_set: str = ""  # a Telegram sticker set the answers may send from; none: no stickers
-    photos: bool = False  # answers may send an image from the web by its address
+    # hosts (and their subdomains) answers may send an image from by its address; Telegram fetches
+    # it with no tap, so only trusted hosts: an open list would let a page the assistant read send
+    # the chat's data anywhere. None: no photos
+    photo_hosts: tuple = ()
 
     @classmethod
     def from_dict(cls, raw: object) -> Profile:
@@ -208,7 +211,11 @@ class Profile:
             sticker_set=str(tg.get("sticker_set"))
             if isinstance(tg.get("sticker_set"), str)
             else "",
-            photos=tg.get("photos") is True,
+            photo_hosts=tuple(
+                str(h) for h in tg.get("photo_hosts") or () if isinstance(h, str) and h.strip()
+            )
+            if isinstance(tg.get("photo_hosts"), list | tuple)
+            else (),
         )
 
 
@@ -1964,7 +1971,7 @@ class Bot:
             rules = assistant.rules(
                 p.name, p.language, admins, block_cfg.get("instructions") or "", self.read_all
             )
-            rules += "\n\n" + gestures.guide("en", p.style, bool(p.sticker_set), p.photos)
+            rules += "\n\n" + gestures.guide("en", p.style, bool(p.sticker_set), p.photo_hosts)
             turn = assistant.turn(
                 conversation,
                 rules,
@@ -2014,7 +2021,7 @@ class Bot:
         ]
         covered = [*lines, *handed]
         reply_to = _mid(covered[0]) if len(covered) == 1 else None
-        text, acts = gestures.extract(reply.text)
+        text, acts = gestures.extract(reply.text, self.profile.photo_hosts, self.t("file_name"))
         text, block = assistant.extract(text)
         text, settings = assistant.extract(text, "settings")
         text, offered = assistant.extract_options(text)
@@ -3245,11 +3252,9 @@ class Bot:
                 shown = True
             except TelegramError as e:
                 log.warning("document failed: %s", safe(e))
-        sends = []
-        if self.profile.photos:
-            sends += [
-                ("sendPhoto", {"photo": p["url"], "caption": p["caption"]}) for p in acts["photos"]
-            ]
+        sends = [
+            ("sendPhoto", {"photo": p["url"], "caption": p["caption"]}) for p in acts["photos"]
+        ]
         sticker = self.sticker(acts["sticker"])
         if sticker:
             sends.append(("sendSticker", {"sticker": sticker}))

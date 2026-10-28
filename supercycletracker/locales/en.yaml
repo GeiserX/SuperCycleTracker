@@ -34,6 +34,7 @@ line_deleted: "• {date}: deleted"
 line_note: "• {date}: note updated"
 invalid_block: "I could not note that properly, so I saved nothing. Can you tell me with the buttons?"
 ai_down: "Right now I cannot read written messages. You can note it with the buttons, and if you write it again later I will read it."
+file_name: "file"  # a file the assistant sends whose name has no letter left
 ai_busy: "I can't answer right now: I have no capacity left for {wait}. I'll answer everything then, with no need to repeat anything. Meanwhile you can note it with the buttons."
 busy_minutes: "about {n} minutes"
 busy_hours: "about {n} hours"

@@ -565,7 +565,7 @@ below follow them:
 ```
 You are the cycle companion of {name} in a Telegram chat. The cycle is hers; {others} may also
 write (they are family and can report for her). Answer in {language_name}: warm, brief (two to five
-short sentences unless she asks for more), plain text with no Markdown, links as bare URLs.
+short sentences unless she asks for more), formatted as the last section of these rules says.
 
 Messages arrive as "Name: text". A reply carries "[replying to the bot: ...]" in front. A reply
 to someone else's message names what it points at: "Name (replying to Name's photo of
@@ -845,7 +845,8 @@ bot's voice, `telegram.style`.
 An answer may end with a ```` ```telegram ```` block (`gestures.py`): `react: <emoji>` (one of
 Telegram's reactions, on the message answered; an answer that is only a reaction sends no text, and
 a reaction that fails is sent as that emoji), `sticker: <emoji>` (from `telegram.sticker_set`, else
-nothing) and `photo: https://... | caption` (only with `telegram.photos`, three at most). A
+nothing) and `photo: https://... | caption` (only on a host of `telegram.photo_hosts`, three at
+most; Telegram fetches it with no tap, so only trusted hosts). A
 ```` ````document name.md | caption ```` block is sent as a file (.md, .txt, .csv, .json or .ics,
 200 KB, three at most). Anything else is dropped. Each goes after the text on its own, so one
 Telegram refuses never loses the answer.
@@ -956,7 +957,7 @@ Return value, either a bare string (no conversation kept) or:
   reports something slow, such as a change it is making that takes minutes, without holding the turn.
   The app runs it after it has posted `text` (and applied the block), on one background thread: one
   job at a time across every chat, first in, first out, so a turn is never kept waiting by it. The
-  string it returns goes to the same chat as plain text, like an answer; an empty one posts nothing.
+  string it returns goes to the same chat as Telegram HTML, like an answer (5.7); an empty one posts nothing.
   If it raises, or returns something that is not a string, the app posts `later_failed` and logs the
   exception class only. The app sets no time limit: the plugin bounds its own work. A turn that fails
   (`kept: false`, an exception, an answer Telegram refused) never runs its `later`. A restart loses a
@@ -1053,7 +1054,8 @@ locale. English source strings and their Spanish translations:
 | `reminders_*`, `reminder_*`, `remind_set*`, `ask_preapproved`, `entry_*`, `plan_moved`, `*_turn` | /recordatorios, a reminder posted, the toasts, the approval a button gave, the message a calendar button sends | idem |
 
 `{m}` is the mention (`@username` or the HTML text mention); the bot's own templates go out with
-`parse_mode: HTML`. Assistant answers go out as plain text with `reply_parameters` to her message.
+`parse_mode: HTML`. Assistant answers go out as Telegram HTML from light Markdown (5.7), with
+`reply_parameters` to her message; a part Telegram cannot parse goes again as plain text.
 
 `tests/test_i18n.py` is a check that can fail, with a positive control: every `en` key exists in `es`
 with the same `{placeholders}`; every Spanish string containing `?` also contains `¿` and every `!` a
@@ -1212,6 +1214,7 @@ joins a group or its abilities change.
 | `test_repo.py` | one commit after 60 s quiet for three taps; flush on SIGTERM; the human clone pushes a profile edit between the bot's commit and push, the bot rebases and both land; the human clone changes a line of `log.jsonl` the bot also changed: the pull completes, the bot's line wins, the human's other edits survive, the push lands; the remote refuses the push (a hook that exits 1): the commit stays, `/estado` counts it, the next flush pushes after the hook is removed (positive control); `/deshacer` on a dirty file restores HEAD with no commit, on a clean `log:` HEAD makes an `undo:` commit, and on an `undo:` HEAD says nothing to undo; a pull that changes the profile raises the reload flag and one that changes only the log does not; `write_profile` commits the profile alone (a dirty log stays out), `flush` pushes it, and a refused or failed commit leaves the file and the index as they were (a pre-commit hook that exits 1, then removed as the positive control); commit messages contain no flow or symptom words; the token never appears in `git config` |
 | `test_applehealth.py` | a fictional export in a zip with a localised member name and a `_cda.xml` beside it; the three value forms; metadata child counted; `NotPresent` skipped; heaviest of a day; `IntermenstrualBleeding` to `spotting`; a `startDate` at 23:30 +0000 lands on the next day in the profile timezone; chat days never overwritten; a rerun is a no-op; `--dry-run` writes nothing |
 | `test_turns.py` | section 5.2: one answer per burst, lines handed to a running turn, edits, choices as buttons, asks; a line queued before a restart and a turn killed mid-flight are answered by the next process |
+| `test_gestures.py` | the renderer (folds, quotes, code with its language, hostile markup never opening a tag), the gestures block on hostile model output (dropped), the HTML send and its plain-text resend, a reaction alone sends no text and a failed one sends the emoji, files and a refused file never losing the text, a file name with no letter named in her language, stickers only from the profile's set, photos only from `photo_hosts`, the voice reaching the rules |
 | `test_offers.py` | the chat log: group talk goes to the next turn as `[not to you]` context once and is never answered, nothing is kept with `asked`, a failed turn keeps it, the recap leaves out the new lines and reaches back `history_days` only (0: none), edits rewrite the log and one that adds the mention keeps one row, `/nuevo` forgets it; an offer says no answer does nothing and expires into «Sin respuesta: nada»; the rules say who reaches the assistant; the calendar plan's dates (and none once late), its place in `context.md`, its offer once per key in waking hours with configurable titles, one tap approving exactly its entries, a moved plan offered again, «Nada» and strangers; reminders offered (past ones dropped, the calendar button only when set), posted once at their time, late after a restart, listed and cancelled, expiring, the calendar button approving that one addition and no other time, only for the person answered, and the block parsed strictly |
 | `test_i18n.py`, `test_privacy.py` | sections 7 and 11 |
 
@@ -1226,7 +1229,9 @@ supercycletracker/
   records.py         FLOWS, SYMPTOMS, load/save, derive_starts, validate_block, apply -> Change
   cycle.py           bot_day, predict, phase, queue, calendar_plan; pure, today passed in
   i18n.py            Translator; locales/en.yaml, locales/es.yaml
-  telegram.py        urllib Bot API client, TelegramError, safe()
+  telegram.py        urllib Bot API client (JSON calls, send_file for a document), TelegramError, safe()
+  render.py          the assistant's light Markdown as Telegram HTML, and split at the message limit
+  gestures.py        an answer's telegram and document blocks: reaction, sticker, photo, files
   bot.py             loop, tick, handlers, cards, commands, worker queue
   assistant.py       plugin loading, turn, context.md, extract
   rules.md           the assistant rules (5.3)
@@ -1237,6 +1242,7 @@ tests/
   fixtures/          fake_plugin.py, export_fictional.xml, log_fictional.jsonl
   test_records.py test_cycle.py test_schedule.py test_bot.py test_turns.py test_offers.py
   test_repo.py test_assistant.py test_cli.py test_telegram.py test_applehealth.py test_i18n.py
+  test_gestures.py
   test_privacy.py
 docs/DESIGN.md       this file
 Dockerfile           python:3.12.<patch>-slim pinned, uv pinned, git + ca-certificates,
@@ -1292,7 +1298,9 @@ telegram:
   style: |                  # the bot's voice in the chat, read after the formatting rules
     Warm and discreet. No stickers when she is in pain or worried.
   sticker_set: ""           # a Telegram sticker set answers may send from; empty: no stickers
-  photos: false             # true: answers may send an image from the web by its address
+  photo_hosts: []           # hosts answers may send an image from by its address; none: no photos.
+                            # Telegram fetches it with no tap: only hosts you trust, or a page the
+                            # assistant reads could send the chat's data to a server in the URL
 assistant:                  # optional; without it the bot is buttons and commands only
   plugin: plugins/assistant.py
   timeout_s: 600
@@ -1340,7 +1348,6 @@ the new tag on its own.
   high. The calendar plan's phases (5.6) split the cycle at the textbook point and name no
   ovulation day.
 - **A spotting flow value.** Spotting is a symptom so it can never move a cycle start.
-- **Markdown in assistant replies.** Plain text means no HTML converter and no parse failures.
 - **Background retries of failed assistant turns.** The buttons are the fallback, and her unseen
   message rides along with her next one.
 - **Caps on asking during a late period.** The question stays neutral and daily until she answers.
