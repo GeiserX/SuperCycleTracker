@@ -105,10 +105,14 @@ def to_html(md):
 
 
 def _open_fence(text):
-    """The line that opened a fence still open at the end of `text` ("```fold", "```python"), or None."""
+    """The fence still open at the end of `text`, as the line that reopens it: "```fold" or "```python"
+    when it opened as one, else a bare "```" (never a long opening line, so a cut always moves on);
+    None when every fence is closed."""
     opened = None
     for m in re.finditer(r"```([^\n`]*)", text):
-        opened = None if opened is not None else "```" + m.group(1).strip()
+        info = m.group(1).strip()
+        keep = info.lower() == "fold" or _LANG.fullmatch(info)
+        opened = None if opened is not None else "```" + (info if keep else "")
     return opened
 
 
