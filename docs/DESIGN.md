@@ -834,6 +834,22 @@ covered several people), and only they may tap, for 30 minutes.
 Setting and cancelling a reminder, and offering the plan, go into the chat log, so the assistant
 knows what she chose.
 
+### 5.7 How an answer looks, and what it does besides its text
+
+The answer is sent as Telegram HTML from light Markdown (`render.py`): bold, italic, underline,
+strike, spoilers, code, links, headings, lists, quotes, code blocks with their language, and a
+```` ```fold ```` block as an expandable quote for detail she may skip. A part Telegram cannot parse
+goes again as plain text. The rules end with the formatting guide (`gestures.guide`) and then the
+bot's voice, `telegram.style`.
+
+An answer may end with a ```` ```telegram ```` block (`gestures.py`): `react: <emoji>` (one of
+Telegram's reactions, on the message answered; an answer that is only a reaction sends no text, and
+a reaction that fails is sent as that emoji), `sticker: <emoji>` (from `telegram.sticker_set`, else
+nothing) and `photo: https://... | caption` (only with `telegram.photos`, three at most). A
+```` ````document name.md | caption ```` block is sent as a file (.md, .txt, .csv, .json or .ics,
+200 KB, three at most). Anything else is dropped. Each goes after the text on its own, so one
+Telegram refuses never loses the answer.
+
 ## 6. The plugin contract (public app ⇄ assistant plugin)
 
 The app loads one Python file from the data directory. `profile.yaml` `assistant.plugin` gives its path;
@@ -1273,6 +1289,10 @@ telegram:
   admins: {222: Marta}      # may use /estado, /nuevo, /presentacion, and log for her
   history_scope: asked      # asked | all: all keeps the group's other messages as context (4.3)
   history_days: 14          # 0..60: the chat log a fresh conversation is recapped from (5.2)
+  style: |                  # the bot's voice in the chat, read after the formatting rules
+    Warm and discreet. No stickers when she is in pain or worried.
+  sticker_set: ""           # a Telegram sticker set answers may send from; empty: no stickers
+  photos: false             # true: answers may send an image from the web by its address
 assistant:                  # optional; without it the bot is buttons and commands only
   plugin: plugins/assistant.py
   timeout_s: 600

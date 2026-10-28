@@ -13,6 +13,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Callable
 
 API = "https://api.telegram.org"
@@ -99,6 +100,36 @@ class Telegram:
             raise err
         raise AssertionError("unreachable")  # pragma: no cover
 
+    def send_file(self, method: str, field: str, name: str, data: bytes, mime: str, **params):
+        """`method` (sendDocument) with the bytes `data` as the multipart part `field`, named `name`;
+        the other params as form fields (non-strings as JSON). Errors as `call`, no 429 retry: a file
+        is one try, sent after the answer's text."""
+        boundary = uuid.uuid4().hex
+        parts = []
+        for k, v in params.items():
+            if v is None:
+                continue
+            v = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n')
+            parts.append(v + "\r\n")
+        safe_name = re.sub(r'["\r\n]', "", name)
+        head = "".join(parts) + (
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"; '
+            f'filename="{safe_name}"\r\nContent-Type: {mime}\r\n\r\n'
+        )
+        body = head.encode() + data + f"\r\n--{boundary}--\r\n".encode()
+        payload = self._post(
+            method, body, HTTP_MARGIN_S + 45, f"multipart/form-data; boundary={boundary}"
+        )
+        if payload.get("ok"):
+            return payload.get("result")
+        raise TelegramError(
+            method,
+            int(payload.get("error_code") or 0),
+            str(payload.get("description") or ""),
+            payload.get("parameters") if isinstance(payload.get("parameters"), dict) else None,
+        )
+
     def download(self, file_path: str, limit: int | None = None) -> bytes:
         """The bytes of a file `getFile` returned, from Telegram's file URL (the token is in it,
         so its errors carry no URL, like `call`). More than `limit` bytes raises
@@ -120,7 +151,9 @@ class Telegram:
             raise TelegramError("download", 413, "file too large")
         return raw
 
-    def _post(self, method: str, body: bytes, timeout: float) -> dict:
+    def _post(
+        self, method: str, body: bytes, timeout: float, content_type: str = "application/json"
+    ) -> dict:
         """The response body as a dict. A body that is not a JSON object (an HTML page from a
         proxy) becomes `{ok: false, error_code: <status>}`, so `call` treats every 429 alike.
 
@@ -131,7 +164,7 @@ class Telegram:
         status, failure = 0, None
         try:
             request = urllib.request.Request(
-                self._url + method, data=body, headers={"Content-Type": "application/json"}
+                self._url + method, data=body, headers={"Content-Type": content_type}
             )
             with self._urlopen(request, timeout=timeout) as response:
                 raw = response.read()

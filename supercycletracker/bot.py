@@ -44,7 +44,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
-from supercycletracker import __version__, assistant, cycle, records
+from supercycletracker import __version__, assistant, cycle, gestures, records, render
 from supercycletracker.i18n import Translator
 from supercycletracker.records import SYMPTOMS, BlockError, Change, Day, Edit, Log
 from supercycletracker.repo import DATA_LOCK, KV, STATE_DB, GitError, Repo
@@ -167,6 +167,9 @@ class Profile:
     history_days: int | None = HISTORY_DAYS  # None: not a whole number (profile_errors)
     assistant: Mapping | None = None
     calendar: Mapping = field(default_factory=dict)
+    style: str = ""  # the bot's voice in the chat, read after the formatting guide (gestures)
+    sticker_set: str = ""  # a Telegram sticker set the answers may send from; none: no stickers
+    photos: bool = False  # answers may send an image from the web by its address
 
     @classmethod
     def from_dict(cls, raw: object) -> Profile:
@@ -201,6 +204,11 @@ class Profile:
             history_days=HISTORY_DAYS if days is None else _int(days),
             assistant=dict(block) if isinstance(block, Mapping) else None,
             calendar=dict(calendar) if isinstance(calendar, Mapping) else {},
+            style=str(tg.get("style")) if isinstance(tg.get("style"), str) else "",
+            sticker_set=str(tg.get("sticker_set"))
+            if isinstance(tg.get("sticker_set"), str)
+            else "",
+            photos=tg.get("photos") is True,
         )
 
 
@@ -601,6 +609,7 @@ class Bot:
         self.clock, self.sleep = time.monotonic, time.sleep
         self._q = threading.Lock()
         self._newest: dict[int, float] = {}
+        self._stickers: dict = {}  # the profile's sticker set, read once ({"name", "set"})
         self._voicing: dict[int, dict] = {}  # chat -> {line id: when the note arrived}
         self._running: dict[int, Turn] = {}
         self._resting: dict[int, float] = {}  # chat -> clock() its turn waits for (busy plugin)
@@ -1955,6 +1964,7 @@ class Bot:
             rules = assistant.rules(
                 p.name, p.language, admins, block_cfg.get("instructions") or "", self.read_all
             )
+            rules += "\n\n" + gestures.guide("en", p.style, bool(p.sticker_set), p.photos)
             turn = assistant.turn(
                 conversation,
                 rules,
@@ -2004,7 +2014,8 @@ class Bot:
         ]
         covered = [*lines, *handed]
         reply_to = _mid(covered[0]) if len(covered) == 1 else None
-        text, block = assistant.extract(reply.text)
+        text, acts = gestures.extract(reply.text)
+        text, block = assistant.extract(text)
         text, settings = assistant.extract(text, "settings")
         text, offered = assistant.extract_options(text)
         text, listed = assistant.extract_reminders(text)
@@ -2019,6 +2030,7 @@ class Bot:
             self._told_busy.discard(chat)  # answered: a later busy spell is told again
         if text:
             self.kv.add_chat(chat, "assistant", None, text, int(self.now().timestamp()))
+        self.act(chat, acts, _mid(covered[-1]), bool(text), reply_to)
         if block is not None:
             source = "admin" if all(x.get("admin") for x in covered) else "telegram"
             self.apply_block(chat, block, source, today)
@@ -3177,7 +3189,7 @@ class Bot:
         if offered:
             hint = self.t("yes_no_hint" if self.yes_no(offered) else "options_hint")
             text = f"{text}\n\n{hint}"
-        parts = split_text(text)
+        parts = render.split(text)
         for i, part in enumerate(parts):
             markup = None
             if i == len(parts) - 1 and key:
@@ -3187,14 +3199,23 @@ class Bot:
             parameters = None
             if reply_to and i == 0:
                 parameters = {"message_id": reply_to, "allow_sending_without_reply": True}
+            params = {
+                "chat_id": chat,
+                "reply_parameters": parameters,
+                "reply_markup": markup,
+                "link_preview_options": {"is_disabled": True},
+            }
             try:
-                sent = self.tg.call(
-                    "sendMessage",
-                    chat_id=chat,
-                    text=part,
-                    reply_parameters=parameters,
-                    reply_markup=markup,
-                )
+                try:
+                    sent = self.tg.call(
+                        "sendMessage", text=render.to_html(part), parse_mode="HTML", **params
+                    )
+                except TelegramError as e:
+                    if e.code != 400:
+                        raise
+                    # markup Telegram will not parse: the same words as plain text, never lost
+                    log.info("formatting refused, sending plain text: %s", safe(e))
+                    sent = self.tg.call("sendMessage", text=part, **params)
             except TelegramError as e:
                 log.warning("send failed: %s", safe(e))
                 return False
@@ -3202,6 +3223,73 @@ class Bot:
             msg = sent.get("message_id") if isinstance(sent, Mapping) else None
             self.offer(chat, msg, key, offered, users)
         return True
+
+    def act(
+        self, chat: int, acts: Mapping, to: int | None, texted: bool, reply_to: int | None = None
+    ) -> None:
+        """What the answer's gestures block asks for (gestures.py), each on its own after the
+        text, so a file or a reaction Telegram refuses never loses the answer. A reaction goes on
+        message `to`; when it cannot and the answer had no text, the emoji is said instead."""
+        shown = texted
+        for doc in acts["documents"]:
+            try:
+                self.tg.send_file(
+                    "sendDocument",
+                    "document",
+                    doc["name"],
+                    doc["data"],
+                    doc["mime"],
+                    chat_id=chat,
+                    caption=doc["caption"],
+                )
+                shown = True
+            except TelegramError as e:
+                log.warning("document failed: %s", safe(e))
+        sends = []
+        if self.profile.photos:
+            sends += [
+                ("sendPhoto", {"photo": p["url"], "caption": p["caption"]}) for p in acts["photos"]
+            ]
+        sticker = self.sticker(acts["sticker"])
+        if sticker:
+            sends.append(("sendSticker", {"sticker": sticker}))
+        for method, params in sends:
+            try:
+                self.tg.call(method, chat_id=chat, **params)
+                shown = True
+            except TelegramError as e:
+                log.warning("%s failed: %s", method, safe(e))
+        if not acts["react"]:
+            return
+        if to is not None:
+            try:
+                self.tg.call(
+                    "setMessageReaction",
+                    chat_id=chat,
+                    message_id=to,
+                    reaction=[{"type": "emoji", "emoji": acts["react"]}],
+                )
+                return
+            except TelegramError as e:
+                log.info("reaction failed: %s", safe(e))
+        if not shown:
+            note = (
+                {"message_id": reply_to, "allow_sending_without_reply": True} if reply_to else None
+            )
+            self.post(chat, html.escape(acts["react"]), reply_parameters=note)
+
+    def sticker(self, emoji: str | None) -> str | None:
+        """The file_id of the profile's sticker set for `emoji`, read once per set, or None."""
+        name = self.profile.sticker_set
+        if not emoji or not name:
+            return None
+        if self._stickers.get("name") != name:
+            try:
+                self._stickers = {"name": name, "set": self.tg.call("getStickerSet", name=name)}
+            except TelegramError as e:
+                log.warning("sticker set failed: %s", safe(e))
+                return None
+        return gestures.sticker_for(self._stickers.get("set"), emoji)
 
     def apply_block(self, chat: int, block: object, source: str, today: date) -> None:
         """Validate and write a record block, all or nothing, then «Anotado:» from the

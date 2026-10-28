@@ -573,7 +573,7 @@ def test_the_record_is_written_and_the_confirmation_comes_from_the_change(make_b
     assert texts[0] == "Lo he guardado todo, y también lo de la semana pasada."
     assert texts[1] == "Anotado:\n• jueves 4 de marzo: poco, dolor 2, dolor de cabeza"
     answer = bot.tg.of("sendMessage")[0]
-    assert "parse_mode" not in answer
+    assert answer["parse_mode"] == "HTML"
     assert answer["reply_parameters"]["message_id"] >= 5000
 
 
@@ -691,6 +691,8 @@ def test_the_lines_are_removed_only_after_the_block_is_applied(make_bot, monkeyp
 def test_an_answer_telegram_refuses_gets_the_keyboard_and_keeps_the_lines(make_bot):
     bot = make_bot()
     plugin(bot).REPLIES[:] = [record("Te lo apunto.", {"date": "2027-03-04", "flow": "heavy"})]
+    # refused as HTML and again as plain text, as Telegram does for a message too long
+    bot.tg.fail_next("sendMessage", 400, "Bad Request: message is too long")
     bot.tg.fail_next("sendMessage", 400, "Bad Request: message is too long")
     msg = say(bot, "hoy mucho", reply_to=QUESTION)
     down = bot.tg.of("sendMessage")[-1]
@@ -709,7 +711,9 @@ def test_a_long_answer_is_split_and_only_its_last_part_asks(make_bot):
     sent = bot.tg.of("sendMessage")
     assert len(sent) == 2
     assert all(len(p["text"].encode("utf-16-le")) // 2 <= TEXT_MAX for p in sent)
-    assert "\n\n".join(p["text"] for p in sent) == long
+    # each part is cut at a blank line and loses only the spaces at its end
+    joined = "\n\n".join(p["text"] for p in sent)
+    assert joined.replace(" \n", "\n") == long.replace(" \n", "\n")
     assert sent[0]["reply_parameters"]["message_id"] == msg["message_id"]
     assert "reply_parameters" not in sent[1] and "reply_markup" not in sent[0]
     assert sent[1]["reply_markup"] == {"force_reply": True, "selective": True}
@@ -1829,7 +1833,7 @@ def test_later_runs_after_the_answer_and_posts_its_text(make_bot):
     first, second = bot.tg.of("sendMessage")
     assert first["text"] == "Me pongo con ello."
     assert second["text"] == "Hecho." and second["chat_id"] == GROUP
-    assert "parse_mode" not in second  # plain text, like an answer
+    assert second["parse_mode"] == "HTML"  # formatted, like an answer
 
 
 @pytest.mark.parametrize("out", [RuntimeError("su nombre y sus palabras"), 42, ""])

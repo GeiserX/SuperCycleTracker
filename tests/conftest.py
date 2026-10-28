@@ -165,7 +165,9 @@ class FakeTelegram:
             if method == "getUpdates":
                 batch = self.updates.pop(0) if self.updates else []
                 return batch() if callable(batch) else batch
-            if method == "sendMessage":
+            if method == "getStickerSet":
+                return {"name": params["name"], "stickers": [{"emoji": "🌸", "file_id": "STK"}]}
+            if method in ("sendMessage", "sendDocument", "sendPhoto", "sendSticker"):
                 self._next_id += 1
                 return {
                     "message_id": self._next_id,
@@ -173,6 +175,9 @@ class FakeTelegram:
                     "text": params.get("text", ""),
                 }
             return True
+
+    def send_file(self, method: str, field: str, name: str, data: bytes, mime: str, **params):
+        return self.call(method, **params, **{field: name, "data": data, "mime": mime})
 
     def download(self, file_path: str, limit: int | None = None) -> bytes:
         file_id = file_path.removeprefix("voice/").removesuffix(".oga")
