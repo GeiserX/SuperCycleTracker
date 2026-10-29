@@ -32,6 +32,8 @@ line_deleted: "• {date}: borrado"
 line_note: "• {date}: nota actualizada"
 invalid_block: "No he sabido anotarlo bien, así que no he guardado nada. ¿Me lo dices con los botones?"
 ai_down: "Ahora mismo no puedo leer mensajes escritos. Puedes anotarlo con los botones y, si me lo vuelves a escribir más tarde, lo leo."
+file_name: "archivo"  # a file the assistant sends whose name has no letter left
+send_failed: "No he podido enviarte lo que tenía. ¿Me lo pides otra vez?"
 ai_busy: "Ahora no puedo contestar: no me queda capacidad hasta dentro de {wait}. Entonces te contesto a todo, sin que haga falta repetir nada. Mientras, puedes anotarlo con los botones."
 busy_minutes: "unos {n} minutos"
 busy_hours: "unas {n} horas"

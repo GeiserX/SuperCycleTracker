@@ -86,6 +86,12 @@ telegram:
   admins: {222: Marta}      # may use /estado, /nuevo, /presentacion and log for her
   history_scope: asked      # asked | all: all keeps the group's other messages as context
   history_days: 14          # the chat log a fresh assistant conversation starts from
+  style: |                  # the bot's voice in the chat, read after the formatting rules
+    Warm and discreet. No stickers when she is in pain or worried.
+  sticker_set: ""           # a Telegram sticker set answers may send from; empty: no stickers
+  photo_hosts: []           # hosts answers may send an image from by its address; none: no photos.
+                            # Telegram fetches it with no tap: only hosts you trust, or a page the
+                            # assistant reads could send the chat's data to a server in the URL
 assistant:                  # optional; without it the bot is buttons and commands only
   plugin: plugins/assistant.py
   timeout_s: 600
