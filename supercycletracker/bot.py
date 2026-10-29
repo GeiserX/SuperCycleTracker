@@ -3192,7 +3192,7 @@ class Bot:
     ) -> bool:
         """An assistant answer: plain text, a reply to her message, split at Telegram's limit.
         With choices (`offered`) its last part carries them as buttons, for `users` to tap, and a
-        line saying they may answer in their own words instead; without, one that ends with a
+        line saying nothing happens without an answer; without, one that ends with a
         question carries a selective force_reply, so her answer reaches the bot too. False when a
         part could not be sent."""
         key = secrets.token_hex(4) if offered else None
