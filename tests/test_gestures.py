@@ -77,6 +77,18 @@ def test_a_long_answer_comes_out_short_with_the_detail_folded(make_bot):
     assert shown.strip() == "Este ciclo va como los anteriores."
     assert "Día 39" in folded
     assert msg["reply_markup"] == {"force_reply": True, "selective": True}
+    assert msg["text"].endswith("</blockquote>\n¿Lo apunto?")  # the question stays in sight
+
+
+def test_a_gesture_only_answer_that_reaches_nobody_still_answers(make_bot):
+    bot = make_bot()  # no sticker set: the sticker cannot go, so its emoji is said
+    plugin(bot).REPLIES[:] = ["```telegram\nsticker: 🌸\n```"]
+    say(bot, "hola", reply_to=QUESTION)
+    assert sent(bot)[-1]["text"] == "🌸"
+    bot.tg.fail_next("sendDocument", 400, "Bad Request: file is empty")
+    plugin(bot).REPLIES[:] = ["````document resumen.md\n# Ciclo\n````"]
+    say(bot, "resumen", reply_to=QUESTION)
+    assert sent(bot)[-1]["text"] == bot.t("send_failed")
 
 
 def test_a_reaction_alone_says_nothing_and_a_failed_one_says_the_emoji(make_bot):
@@ -112,6 +124,7 @@ def test_a_sticker_needs_the_profiles_set_and_the_voice_reaches_the_rules(make_b
     say(bot, "hola", reply_to=QUESTION)
     assert bot.tg.of("sendSticker") == []
     assert "sticker:" not in plugin(bot).CALLS[-1]["turn"]["rules"]
+    assert "Sé breve" in plugin(bot).CALLS[-1]["turn"]["rules"]  # in her language, like the rest
     bot = make_bot(profile=WITH_STICKERS)
     plugin(bot).REPLIES[:] = ["Hecho.\n```telegram\nsticker: 🌸\n```"]
     say(bot, "hola", reply_to=QUESTION)

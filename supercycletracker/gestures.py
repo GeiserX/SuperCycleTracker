@@ -35,6 +35,7 @@ it imports nothing else, so a bot that cannot depend on this package can carry a
 
 import re
 import unicodedata
+import urllib.parse
 
 PHOTOS_MAX = 3
 DOCS_MAX = 3
@@ -154,15 +155,27 @@ def _caption(text):
     return text[:CAPTION_CHARS] or None
 
 
+def _host(name):
+    """Whether `name` is a bare host name with at least two labels (`upload.wikimedia.org`): never a
+    URL, a port, a user or a lone `com`, which would let in every host under it."""
+    return bool(
+        re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+", name)
+    )
+
+
 def _url(value, hosts):
     """`value` when it is a plain https URL on one of `hosts` (or a subdomain of one), else None."""
     value = value.strip()
-    host = value.split("/")[2].lower() if value.count("/") >= 2 else ""
+    try:
+        netloc = urllib.parse.urlsplit(value).netloc.lower()
+    except ValueError:
+        return None
+    host = netloc if _host(netloc) else ""  # a user, a port or anything odd in it: no host
     if (
         not value.startswith("https://")
         or len(value) > URL_CHARS
         or re.search(r"[\s<>\"'\\\x00-\x1f\x7f]", value)
-        or not re.fullmatch(r"[a-z0-9.-]+", host)
+        or not host
         or not any(host == h or host.endswith("." + h) for h in hosts)
     ):
         return None
@@ -211,7 +224,9 @@ def extract(text, photo_hosts=(), fallback="file"):
      "documents": [{"name", "data" (bytes), "mime", "caption"}]}."""
     found = {"react": None, "sticker": None, "photos": [], "documents": []}
     text, found["documents"] = _documents(text.replace("\x00", ""), fallback)
-    hosts = [h.strip().lower() for h in photo_hosts if h and h.strip()]
+    hosts = [
+        h.strip().lower() for h in photo_hosts if isinstance(h, str) and _host(h.strip().lower())
+    ]
     for block in _BLOCK.findall(text):
         for line in block.splitlines():
             key, sep, value = line.strip().lstrip("-*• ").partition(":")
@@ -328,7 +343,9 @@ def guide(lang="en", voice="", stickers=False, photo_hosts=()):
     """The model's instructions for all of the above, in `lang` (English when it has none): the sticker
     and photo lines only when the bot can send them, and the bot's own `voice` (its settings) last."""
     lang = lang if lang in GUIDE else "en"
-    hosts = ", ".join(h.strip() for h in photo_hosts if h and h.strip())
+    hosts = ", ".join(
+        h.strip() for h in photo_hosts if isinstance(h, str) and _host(h.strip().lower())
+    )
     photo = _PHOTO[lang].replace("{hosts}", hosts) if hosts else ""
     extras = (_STICKER[lang] if stickers else "") + photo
     tail = _VOICE[lang] + voice.strip() + "\n" if voice and voice.strip() else ""

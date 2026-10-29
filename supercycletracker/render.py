@@ -22,6 +22,7 @@ import re
 
 LIMIT = 3500  # under Telegram's 4096 characters per message, with room for the markup
 BRIEF = 700  # what an answer shows before the rest is folded: a few lines on a phone
+ASK = 300  # the longest closing question `brief` keeps out of the fold
 
 _TAGS = r"b|i|u|s|tg-spoiler"
 _BODY = (
@@ -123,7 +124,8 @@ def brief(md, limit=BRIEF):
     """`md` as a few lines: past `limit` characters, the rest goes in a ```fold block, cut at a blank
     line (else a line end), so a long answer reads short and its detail is one tap away. Left as
     written when it is short, when it holds a fenced block, when a `>` quote comes after the cut (a
-    fold holds neither), or when no line end falls within `limit`."""
+    fold holds neither), or when no line end falls within `limit`. A closing question stays under
+    the fold, in sight, since the person is asked to answer it."""
     text = md.strip()
     if len(text) <= limit or "```" in text:
         return text
@@ -135,25 +137,45 @@ def brief(md, limit=BRIEF):
     head, rest = text[:cut].rstrip(), text[cut:].strip()
     if not rest or re.search(r"(?m)^>", rest):
         return text
-    return f"{head}\n```fold\n{rest}\n```"
+    ask = ""
+    last = rest.rfind("\n\n")
+    if last > 0 and rest.endswith("?") and len(rest) - last <= ASK:
+        rest, ask = rest[:last].rstrip(), "\n" + rest[last:].strip()
+    return f"{head}\n```fold\n{rest}\n```{ask}"
+
+
+def _units(text):
+    """`text`'s length as Telegram counts it: UTF-16 code units, two for an emoji outside the BMP."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _fit(text, limit):
+    """How many characters of `text` fit in `limit` UTF-16 code units."""
+    units = 0
+    for i, ch in enumerate(text):
+        units += 2 if ord(ch) > 0xFFFF else 1
+        if units > limit:
+            return i
+    return len(text)
 
 
 def split(text, limit=LIMIT):
-    """`text` in chunks of at most `limit` characters (plus a repaired fence), cut at a blank line,
-    else a line end, else a space, so a chunk rarely splits a paragraph and never a word unless one
-    is longer than `limit`. A cut inside a fenced block closes the fence in the first chunk and
-    reopens it in the next with its own opening line, so both halves render as the same kind of block
-    (code in its language, or a fold)."""
+    """`text` in chunks of at most `limit` UTF-16 code units, as Telegram counts (plus a repaired
+    fence), cut at a blank line, else a line end, else a space, so a chunk rarely splits a paragraph
+    and never a word unless one is longer than `limit`. A cut inside a fenced block closes the fence
+    in the first chunk and reopens it in the next with its own opening line, so both halves render as
+    the same kind of block (code in its language, or a fold)."""
     text = text.replace("\x00", "").strip()
     chunks = []
-    while len(text) > limit:
-        cut = text.rfind("\n\n", 0, limit)
-        if cut < limit // 3:
-            cut = text.rfind("\n", 0, limit)
-        if cut < limit // 3:
-            cut = text.rfind(" ", 0, limit)
+    while _units(text) > limit:
+        fit = _fit(text, limit)
+        cut = text.rfind("\n\n", 0, fit)
+        if cut < fit // 3:
+            cut = text.rfind("\n", 0, fit)
+        if cut < fit // 3:
+            cut = text.rfind(" ", 0, fit)
         if cut <= 0:
-            cut = limit
+            cut = max(fit, 1)
         head, text = text[:cut].rstrip(), text[cut:].strip()
         opened = _open_fence(head)
         if opened is not None:
