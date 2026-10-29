@@ -515,7 +515,7 @@ an edit can be compared with them.
 
 **Choices as buttons.** An answer may end with an ```` ```options ```` block, one `- label` per line
 (at most five, 40 characters each), or the plugin may return `options`. The app shows them as buttons
-under the answer, with «O cuéntame otra cosa. Si no respondes, no hago nada.» under the text (for the
+under the answer, with «Si no respondes, no hago nada.» under the text (for the
 pair Sí and No: «Toca Sí o No. Si quieres otra cosa, responde a este mensaje. Si no respondes, no
 hago nada.»). Only the people the answer covered may tap, once, for 12 hours; a tap goes to the
 worker as that person's next message, with the label as its text, and the buttons give way to
@@ -1046,7 +1046,7 @@ locale. English source strings and their Spanish translations:
 | `words_flow` | none: [none, nothing]; light: [light]; medium: [medium, normal]; heavy: [heavy] | none: [nada]; light: [poco, poquito]; medium: [normal]; heavy: [mucho] |
 | `words_when` | today, yesterday, day before yesterday | hoy, ayer, anteayer |
 | `help`, `intro` | the command list; the introduction an admin posts with /presentacion | idem |
-| `options_hint` / `yes_no_hint` | Or tell me something else. If you do not answer, I do nothing. / Tap Yes or No. If you want something else, reply to this message. If you do not answer, I do nothing. | O cuéntame otra cosa. Si no respondes, no hago nada. / Toca Sí o No. Si quieres otra cosa, responde a este mensaje. Si no respondes, no hago nada. |
+| `options_hint` / `yes_no_hint` | If you do not answer, I do nothing. / Tap Yes or No. If you want something else, reply to this message. If you do not answer, I do nothing. | Si no respondes, no hago nada. / Toca Sí o No. Si quieres otra cosa, responde a este mensaje. Si no respondes, no hago nada. |
 | `remind_offer` | {name}, shall I remind you? {lines} If you do not answer, I do nothing. | {name}, ¿quieres que te lo recuerde? {lines} Si no respondes, no hago nada. |
 | `remind_here` / `remind_calendar` / `remind_nothing` / `remind_timeout` | Reminder here / In the calendar / Nothing / No answer: nothing | Recordatorio aquí / En el calendario / Nada / Sin respuesta: nada |
 | `plan_offer` | {m}, shall I put your cycle forecast in your calendar? {lines} If you do not answer, I do nothing. | {m}, ¿pongo en tu calendario la previsión de tu ciclo? {lines} Si no respondes, no hago nada. |
