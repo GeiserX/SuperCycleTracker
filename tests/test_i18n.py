@@ -67,6 +67,13 @@ def test_english_and_spanish_ship():
         assert (i18n.LOCALES / f"{locale}.yaml").is_file()
 
 
+@pytest.mark.parametrize("locale", ["en", "es"])
+def test_no_message_says_what_happens_without_an_answer(locale):
+    # an untapped offer just expires; no message adds a line saying so
+    for path, s in walk(_load(locale)):
+        assert "no respondes" not in s.lower() and "do not answer" not in s.lower(), path
+
+
 @pytest.mark.parametrize("locale", ["es"])
 def test_every_english_key_exists_with_the_same_placeholders(locale):
     en, other = _load("en"), _load(locale)
