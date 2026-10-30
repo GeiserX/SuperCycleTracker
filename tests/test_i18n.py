@@ -71,7 +71,9 @@ def test_english_and_spanish_ship():
 def test_no_message_says_what_happens_without_an_answer(locale):
     # an untapped offer just expires; no message adds a line saying so
     for path, s in walk(_load(locale)):
-        assert "no respondes" not in s.lower() and "do not answer" not in s.lower(), path
+        low = s.lower()
+        for said in ("no respondes", "no responde,", "do not answer", "does not answer"):
+            assert said not in low, (path, said)
 
 
 @pytest.mark.parametrize("locale", ["es"])
