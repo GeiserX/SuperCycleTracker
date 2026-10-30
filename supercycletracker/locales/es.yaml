@@ -119,7 +119,7 @@ intro: |-
   Puede responder a cualquiera de mis mensajes con sus palabras o con una nota de voz, y lo anoto.
   Puede preguntarme dudas sobre su ciclo o su salud; contesto teniendo en cuenta su propio historial y busco en fuentes fiables.
   Si quiere cambiar algo (la hora a la que pregunto, cómo funciono), basta con pedírmelo.
-  Cuando puedo hacer algo por ella (un recordatorio, apuntar la previsión del ciclo en su calendario), se lo ofrezco con botones; si no responde, no hago nada. /recordatorios enseña los que hay y deja cancelarlos.
+  Cuando puedo hacer algo por ella (un recordatorio, apuntar la previsión del ciclo en su calendario), se lo ofrezco con botones. /recordatorios enseña los que hay y deja cancelarlos.
   Lo que anoto se guarda en un repositorio privado de esta casa. Para entender lo que escribe y contestar sus dudas, un asistente de IA lee sus mensajes y su historial.
   /ayuda tiene la lista de lo que entiendo.
 

@@ -121,7 +121,7 @@ intro: |-
   She can reply to any of my messages in her own words or with a voice note, and I note it.
   She can ask me about her cycle or her health; I answer with her own history in mind and look things up in reliable sources.
   If she wants to change something (the time I ask, how I work), she only has to ask me.
-  When I can do something for her (a reminder, putting the cycle forecast in her calendar), I offer it with buttons; if she does not answer, I do nothing. /recordatorios shows the ones set and cancels them.
+  When I can do something for her (a reminder, putting the cycle forecast in her calendar), I offer it with buttons. /recordatorios shows the ones set and cancels them.
   What I note is kept in a private repository of this household. To understand what she writes and answer her questions, an AI assistant reads her messages and her history.
   /ayuda lists what I understand.
 
