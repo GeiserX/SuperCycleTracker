@@ -183,14 +183,14 @@ def test_history_settings_are_checked(make_bot):
 # --- 2. offers: buttons that expire, and no answer does nothing ---------------------------
 
 
-def test_an_offer_says_no_answer_does_nothing_and_expires_into_nothing(make_bot):
+def test_an_offer_adds_no_line_for_no_answer_and_expires_into_nothing(make_bot):
     bot = make_bot()
     plugin(bot).REPLIES[:] = [
         {"text": "¿Te pregunto a las 22:00?", "kept": True, "options": ["Sí", "No"]}
     ]
     say(bot, "me preguntas muy pronto", reply_to=QUESTION)
     offer = sent(bot)[-1]
-    assert offer["text"].endswith("Si no respondes, no hago nada.")
+    assert offer["text"].endswith("Toca Sí o No. Si quieres otra cosa, responde a este mensaje.")
     bot.now.advance(hours=12, minutes=1)
     bot.expire_options()
     assert markups(bot)[-1] == {
@@ -280,8 +280,7 @@ def test_the_plan_is_offered_once_in_waking_hours(make_bot):
         "@lucia_example, ¿pongo en tu calendario la previsión de tu ciclo?\n"
         "• Fase folicular: del 6 de marzo al 15 de marzo\n"
         "• Fase lútea: del 16 de marzo al 28 de marzo\n"
-        "• Regla prevista: del 29 de marzo al 2 de abril\n\n"
-        "Si no respondes, no hago nada."
+        "• Regla prevista: del 29 de marzo al 2 de abril"
     )
     assert labels(post["reply_markup"]) == ["Sí", "No"]
     assert not bot.offer_plan(bot.now())  # the same plan is not offered twice
@@ -399,8 +398,7 @@ def test_reminders_in_an_answer_are_offered_with_buttons_and_never_shown_as_a_bl
     assert answer["text"] == "Tómate algo para el dolor antes de dormir."
     assert post["text"] == (
         "@lucia_example, ¿quieres que te lo recuerde?\n"
-        "jueves 4 de marzo, 23:00: Tómate el ibuprofeno\n\n"  # the past one is dropped
-        "Si no respondes, no hago nada."
+        "jueves 4 de marzo, 23:00: Tómate el ibuprofeno"  # the past one is dropped
     )
     assert labels(post["reply_markup"]) == ["Recordatorio aquí", "En el calendario", "No"]
     bot = make_bot(profile=ALL)  # without calendar.reminders: no calendar button
