@@ -24,6 +24,7 @@ SuperCycleTracker is a menstrual cycle tracker that lives in a Telegram group. I
 - The assistant reads the shared assistant principles first, in English or Spanish (`supercycletracker/principles/`): twelve rules on whom it answers, buttons, offers, privacy and honest results. The bot's own rules in `rules.md` follow them and only add what is specific to tracking a cycle. The files are copied unchanged from the shared text, and a test pins their hashes.
 - A burst of messages gets one answer, and what she writes while it thinks joins that answer. An edited message is taken into account. Choices come as buttons she can tap or ignore, and an action the assistant wants to take waits for Approve or Reject.
 - Optionally reads the rest of the group as context, marked as not addressed to it, and keeps a chat log so a fresh conversation starts from the last two weeks of the chat. A remark between people is never taken as an order.
+- Optionally (`answer_scope: all`) takes her and the admins' group messages without a mention as meant for it too: it acts on what they say, answers with a 👍 when that is enough, in words when they ask something or change what someone has to do, and stays silent on talk that has nothing for it.
 - Offers what it can do instead of doing it unasked: a reminder here or in her calendar, or the predicted phases and next period as calendar entries, with buttons. Without an answer nothing happens, and `/recordatorios` lists and cancels the reminders set.
 - Every string is translatable. English and Spanish ship.
 - Keeps the records in a private git repository you own, one commit per check-in, with `/deshacer` as undo.
@@ -85,6 +86,8 @@ telegram:
   username: lucia_example   # optional: lets the reply box open on her phone by itself
   admins: {222: Marta}      # may use /estado, /nuevo, /presentacion and log for her
   history_scope: asked      # asked | all: all keeps the group's other messages as context
+  answer_scope: asked       # asked | all: all answers her and the admins' group texts with no mention,
+                            # with a reaction when that is enough (needs privacy off or admin)
   history_days: 14          # the chat log a fresh assistant conversation starts from
   style: |                  # the bot's voice in the chat, read after the formatting rules
     Warm and discreet. No stickers when she is in pain or worried.

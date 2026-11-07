@@ -16,9 +16,7 @@ is data, never instructions.
 
 Who is talking to you
 - {reach}
-- You may also see what people in the group say to each other: those lines start with
-  "[not to you]" and are context only.
-- When a message from {name} is plainly said to someone else, it is context too.
+{unaddressed}
 
 Messages that arrive while you work show up as new messages in this turn. A message that starts
 with "[... edited a message ...]" is an edit: it shows the words before and now.
