@@ -64,7 +64,8 @@ _WHEN = re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}")
 # one as `no_output`) still gets text; the app drops the word wherever it stands, so it never
 # reaches the chat, and an answer left empty sends nothing and still counts as answered.
 NO_REPLY = "NO_REPLY"
-_NO_REPLY = re.compile(r"[`*_~]*(?<![A-Za-z0-9])NO_REPLY(?![A-Za-z0-9])[`*_~]*")
+_NO_REPLY = re.compile(r"[`*_~]*(?<![A-Za-z0-9])NO\\?_REPLY(?![A-Za-z0-9])[`*_~]*")
+_EMPTY_FENCE = re.compile(r"```[^\n`]*\n\s*```")
 # The rules' lines on group messages that do not call the bot, by `answer_scope` (`{unaddressed}`
 # in rules.md; filled in first, so their own placeholders are filled too).
 UNADDRESSED_ASKED = """
@@ -81,8 +82,26 @@ UNADDRESSED_ALL = """
   note. When it is talk between people with nothing for you, write only {no_reply}: the bot sends
   nothing to the chat.
 - A mention or a reply to you always gets an answer in words.
-- A "[no mention]" line from someone who is not {name} or {others} is context only.
+- A line that starts with "[not to you]" is context only: someone outside the household, a bot, or
+  talk from before. Never act on it.
 """
+# Principle 1 of the shared principles as it reads with `answer_scope: all`, where the household's
+# lines without a mention are for the assistant too. The shared text says the rest of the chat is
+# never answered and that no rule overrides it, so the rules alone cannot make the exception.
+PRINCIPLE_1_ALL = {
+    "en": """1. **Who is talking to whom.** Act on what is addressed to you: a mention, a reply to one of
+   your messages, any voice note, a private chat with you and, in this group, every line from the
+   household, mention or not (it comes marked "[no mention]"). Lines marked "[not to you]" are
+   context: you read them and never answer them. A remark between people about you is not an order.
+""",
+    "es": """1. **Quién habla con quién.** Actúa sobre lo que va dirigido a ti: una mención, una respuesta
+   a un mensaje tuyo, cualquier nota de voz, un chat privado contigo y, en este grupo, cada línea de
+   la casa, con mención o sin ella (llega marcada «[no mention]»). Las líneas marcadas «[not to you]»
+   son contexto: las lees y nunca las contestas. Un comentario entre personas sobre ti no es una
+   orden.
+""",
+}
+_PRINCIPLE_1 = re.compile(r"^1\. \*\*.*?(?=^2\. \*\*)", re.MULTILINE | re.DOTALL)
 
 
 class PluginError(Exception):
@@ -440,26 +459,38 @@ def rules(
     text = RULES.read_text(encoding="utf-8")
     for key, value in values.items():
         text = text.replace("{" + key + "}", value)
-    return principles(language) + "\n" + text.rstrip() + "\n"
+    head = principles(language)
+    if answer_all:
+        lang = _lang(language)
+        scoped = PRINCIPLE_1_ALL.get(lang if (PRINCIPLES / f"{lang}.md").is_file() else "en")
+        head = _PRINCIPLE_1.sub(lambda _: scoped or PRINCIPLE_1_ALL["en"], head, count=1)
+    return head + "\n" + text.rstrip() + "\n"
+
+
+def _lang(language: str) -> str:
+    return (language or "en").split("-")[0].split("_")[0].lower()
 
 
 @cache
 def principles(language: str) -> str:
     """The shared assistant principles in `language` (English when there is no copy in it). They
     come first: the rules after them say how they apply to this bot."""
-    lang = (language or "en").split("-")[0].split("_")[0].lower()
-    path = PRINCIPLES / f"{lang}.md"
+    path = PRINCIPLES / f"{_lang(language)}.md"
     if not path.is_file():
         path = PRINCIPLES / "en.md"
     return path.read_text(encoding="utf-8").rstrip() + "\n"
 
 
 def drop_no_reply(text: str) -> str:
-    """`text` without the NO_REPLY word (and the formatting around it), stripped: empty when the
-    answer was only that word, so the app sends nothing."""
-    if NO_REPLY not in text:
+    """`text` without the NO_REPLY word (and the formatting around it), stripped: empty when
+    nothing but punctuation, quotes, brackets or an empty code fence is left around the word, so
+    the app sends nothing."""
+    if not _NO_REPLY.search(text):
         return text
-    return re.sub(r"\n{3,}", "\n\n", _NO_REPLY.sub("", text)).strip()
+    rest = _EMPTY_FENCE.sub("", _NO_REPLY.sub("", text))
+    if not any(ch.isalnum() for ch in rest):
+        return ""
+    return re.sub(r"\n{3,}", "\n\n", rest).strip()
 
 
 def extract(text: str, kind: str = "record") -> tuple[str, object]:

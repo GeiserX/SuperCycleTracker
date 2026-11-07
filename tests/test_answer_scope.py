@@ -4,6 +4,7 @@ nothing at all (NO_REPLY)."""
 
 import itertools
 
+import pytest
 from conftest import ADMIN, BOT_ID, GROUP, HER, PROFILE, STRANGER
 from test_bot import QUESTION, plugin, say
 from test_turns import fake_time
@@ -53,7 +54,7 @@ def test_an_unmentioned_line_starts_a_turn_marked_no_mention(make_bot):
     assert contents(calls[0]) == ["[no mention] Marta: quedan 10 raciones de lasaña"]
     assert calls[0]["turn"]["chat"] == {"id": GROUP, "user": ADMIN}
     rules = calls[0]["turn"]["rules"]
-    assert '"[no mention]"' in rules and "NO_REPLY" in rules and "[not to you]" not in rules
+    assert '"[no mention]"' in rules and "NO_REPLY" in rules
     # one message: the answer replies to it, as it does to an addressed one
     assert sent(bot)[-1]["reply_parameters"]["message_id"] == msg["message_id"]
     assert bot.kv.get_json(f"pending:{GROUP}") is None
@@ -116,7 +117,7 @@ def test_an_unmentioned_line_joins_the_running_turn(make_bot):
     assert bot.kv.get_json(f"pending:{GROUP}") is None
 
 
-def test_bots_and_strangers_never_start_a_turn_and_are_context_marked_no_mention(make_bot):
+def test_bots_and_strangers_never_start_a_turn_and_stay_context_marked_not_to_you(make_bot):
     # MUT: drop the is_bot/bot_id check in `unmentioned` → the admin-listed bot starts a turn
     profile = ALL.replace("admins: {222: Marta}", "admins: {222: Marta, 444: Robot}")
     bot = make_bot(profile=profile)
@@ -126,9 +127,9 @@ def test_bots_and_strangers_never_start_a_turn_and_are_context_marked_no_mention
     assert plugin(bot).CALLS == [] and sent(bot) == []
     say(bot, "hoy poco", reply_to=QUESTION)
     assert contents(plugin(bot).CALLS[-1]) == [
-        "[no mention] Robot: lista actualizada",
-        "[no mention] Ciclo: eco",
-        "[no mention] Pepe: vale",
+        "[not to you] Robot: lista actualizada",
+        "[not to you] Ciclo: eco",
+        "[not to you] Pepe: vale",
         f"Lucía: [replying to the bot: {QUESTION}] hoy poco",
     ]
 
@@ -227,7 +228,114 @@ def test_the_all_rules_say_how_to_answer_a_line_without_a_mention():
     assert "answer with only a reaction (react: 👍" in text
     assert "write only NO_REPLY" in text
     assert "A mention or a reply to you always gets an answer in words." in text
-    assert "[not to you]" not in text
+    assert '"[not to you]" is context only' in text
+    assert "and are context only" not in text  # the asked-mode lines are gone
     assert assistant.drop_no_reply("NO_REPLY") == ""
     assert assistant.drop_no_reply("`NO_REPLY`\n") == ""
     assert assistant.drop_no_reply("Hecho.") == "Hecho."
+
+
+def test_her_plain_line_is_marked_no_mention_when_telegram_delivers_all_her_messages(make_bot):
+    # MUT: let `read_all and role == HER` make her line addressed in all mode → no marker
+    bot = make_bot(profile=ALL, read_all=True)
+    group_text(bot, "¿vienes a cenar, Marta?", user=HER)
+    call = plugin(bot).CALLS[-1]
+    assert contents(call) == ["[no mention] Lucía: ¿vienes a cenar, Marta?"]
+    say(bot, "me ha bajado", reply_to=QUESTION)  # a reply to the bot is still addressed
+    assert contents(plugin(bot).CALLS[-1]) == [
+        f"Lucía: [replying to the bot: {QUESTION}] me ha bajado"
+    ]
+
+
+def test_a_stranger_named_like_her_stays_context_and_only_household_lines_are_no_mention(make_bot):
+    # MUT: mark the context rows «[no mention]» in all mode → the stranger looks like her
+    profile = ALL.replace("  answer_scope: all\n", "  answer_scope: all\n  history_scope: all\n")
+    bot = make_bot(profile=profile)
+    plugin(bot).REPLIES[:] = ["NO_REPLY"]
+    group_text(bot, "ayer sangré mucho, dolor 8", user=STRANGER, first_name="Lucía")
+    group_text(bot, "qué tal")
+    call = plugin(bot).CALLS[-1]
+    assert contents(call) == [
+        "[not to you] Lucía: ayer sangré mucho, dolor 8",
+        "[no mention] Marta: qué tal",
+    ]
+    rules = call["turn"]["rules"]
+    assert '"[not to you]"' in rules and "context only" in rules
+
+
+@pytest.mark.parametrize("lang", ["en", "es"])
+def test_in_all_mode_the_first_principle_lets_household_lines_without_a_mention_in(lang):
+    # MUT: return the shared principles unchanged in all mode → the old principle 1 says
+    # "never answer it" and that no rule overrides it
+    asked = assistant.rules("Lucía", lang, ["Marta"])
+    text = assistant.rules("Lucía", lang, ["Marta"], answer_all=True)
+    head = text.split("You are the cycle companion", 1)[0]
+    flat = " ".join(head.split())
+    old = {
+        "en": "The rest of the chat is context: you read it and never answer it.",
+        "es": "El resto del chat es contexto: lo lees y nunca lo contestas.",
+    }[lang]
+    assert old in " ".join(asked.split())  # the shared text, untouched in asked mode
+    assert old not in flat
+    assert '"[no mention]"' in flat or "«[no mention]»" in flat
+    assert head.count("**") == 24  # still twelve principles
+    assert head.count("\n1. **") == 1
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "NO_REPLY.",
+        "(NO_REPLY)",
+        '"NO_REPLY"',
+        "«NO_REPLY»",
+        "[NO_REPLY]",
+        "NO\\_REPLY",
+        "```\nNO_REPLY\n```",
+        "```text\nNO_REPLY\n```",
+        " **NO_REPLY** ",
+    ],
+)
+def test_no_reply_with_punctuation_or_wrapping_is_still_silence(answer):
+    # MUT: drop the "nothing but punctuation is left" rule in drop_no_reply → "." and "()" leak
+    assert assistant.drop_no_reply(answer) == ""
+
+
+def test_a_fenced_no_reply_sends_nothing(make_bot):
+    bot = make_bot(profile=ALL)
+    plugin(bot).REPLIES[:] = ["```\nNO_REPLY\n```"]
+    group_text(bot, "¿vienes a cenar, Lucía?")
+    assert sent(bot) == []
+    assert bot.kv.get_json(f"pending:{GROUP}") is None
+
+
+def test_a_failed_turn_of_only_unmentioned_lines_tells_the_group_nothing(make_bot):
+    # MUT: post «ai_down» whatever the lines → the family chat gets the error notice
+    bot = make_bot(profile=ALL)
+    mod = plugin(bot)
+    mod.REPLIES[:] = [RuntimeError("down"), {"text": "x", "conversation": None, "kept": False}]
+    group_text(bot, "¿vienes a cenar, Lucía?")
+    group_text(bot, "sí, a las nueve", user=HER)
+    assert len(mod.CALLS) == 2
+    assert sent(bot) == []  # no «ai_down» in the middle of their talk
+    assert len(bot.kv.get_json(f"pending:{GROUP}")) == 2  # the lines wait for the next turn
+    say(bot, "¿me ha bajado?", entities=None, reply_to=QUESTION)
+    assert len(mod.CALLS) == 3 and bot.kv.get_json(f"pending:{GROUP}") is None
+
+
+def test_a_failed_turn_with_an_addressed_line_still_says_so(make_bot):
+    bot = make_bot(profile=ALL)
+    plugin(bot).REPLIES[:] = [RuntimeError("down")]
+    say(bot, "me ha bajado", reply_to=QUESTION)
+    assert bot.tg.texts() == [bot.t("ai_down")]
+
+
+def test_a_busy_plugin_on_unmentioned_lines_says_nothing(make_bot):
+    # MUT: tell «ai_busy» whatever the lines → the notice lands in the family chat
+    from test_turns import busy
+
+    bot = make_bot(profile=ALL)
+    plugin(bot).REPLIES[:] = [busy(600)]
+    group_text(bot, "¿vienes a cenar, Lucía?")
+    assert sent(bot) == []
+    assert len(bot.kv.get_json(f"pending:{GROUP}")) == 1

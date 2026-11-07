@@ -482,6 +482,11 @@ def _mid(line: Mapping) -> int | None:
     return line["id"] if isinstance(line.get("id"), int) else None
 
 
+def _unmentioned_only(lines: Sequence[Mapping]) -> bool:
+    """Every line is household talk without a mention (`answer_scope: all`)."""
+    return bool(lines) and all(str(x.get("content", "")).startswith(NO_MENTION) for x in lines)
+
+
 def _users(lines: Sequence[Mapping]) -> list[int]:
     return list(dict.fromkeys(x["uid"] for x in lines if x.get("uid")))
 
@@ -1354,14 +1359,10 @@ class Bot:
         """`answer_scope: all`: her and the admins' group messages start a turn, mention or not."""
         return self.profile.answer_scope == "all"
 
-    @property
-    def unaddressed_mark(self) -> str:
-        return NO_MENTION if self.answer_all else NOT_TO_YOU
-
     def log_seen(self, chat: int, msg: Mapping, text: str) -> None:
         """A group message that does not call the bot. With `history_scope: all` (or
         `answer_scope: all`) the chat log keeps it, and it goes to the next turn as context
-        marked «[not to you]» («[no mention]» with `answer_scope: all`)."""
+        marked «[not to you]»."""
         if self.profile.history_scope != "all" and not self.answer_all:
             return
         if not self.has_assistant:
@@ -1381,11 +1382,13 @@ class Bot:
 
         Meant for the bot: a private chat; a reply to any bot message; a message that mentions
         the bot (the mention is stripped); and with privacy off, every text from her in the
-        group. An admin's plain group text never is, so the household can talk in the group."""
+        group (with `answer_scope: all` that text goes through `unmentioned`, marked). An
+        admin's plain group text never is, so the household can talk in the group."""
         reply = msg.get("reply_to_message") or {}
         to_bot = self.bot_id is not None and (reply.get("from") or {}).get("id") == self.bot_id
         body, mentioned = self._strip_mention(msg, text)
-        if not (private or to_bot or mentioned or (self.read_all and role == HER)):
+        her_all = self.read_all and role == HER and not self.answer_all  # all: `unmentioned`
+        if not (private or to_bot or mentioned or her_all):
             return None
         body = body.strip()
         if not body:
@@ -2019,7 +2022,7 @@ class Bot:
                 rules,
                 context,
                 log_text,
-                self.new_lines(lines, seen, self.unaddressed_mark),
+                self.new_lines(lines, seen),
                 self.history(chat, now_ts, last_row, rows | {r["id"] for r in seen}),
                 attachments=atts,
                 chat_id=chat,
@@ -2035,16 +2038,16 @@ class Bot:
             log.warning("ai turn failed: %s", safe(e))
             later = _retry_after(e)
             if later is not None:  # out of capacity: the lines stay and go again by themselves
-                self.rest(chat, later)
+                self.rest(chat, later, quiet=_unmentioned_only(lines))
                 return
-            self.post(chat, self.t("ai_down"), self.today_keyboard())
+            self.tell_down(chat, lines)
             return
         finally:
             with self._q:
                 state.closed = True  # a plugin thread that outlives the turn takes nothing more
         if not reply.kept:
             log.warning("ai turn not kept")
-            self.post(chat, self.t("ai_down"), self.today_keyboard())
+            self.tell_down(chat, lines)
             return
         log.info("ai turn ok %ds", round(time.monotonic() - started))
         self.last_ai = self.now()
@@ -2105,16 +2108,27 @@ class Bot:
             self.later.submit(lambda: self.run_later(chat, job))
             log.info("later queued")
 
-    def rest(self, chat: int, seconds: float) -> None:
+    def tell_down(self, chat: int, lines: Sequence[Mapping]) -> None:
+        """A failed turn: «ai_down» with the keyboard. Not when every line is household talk
+        without a mention (`answer_scope: all`): an error in the middle of their conversation
+        helps nobody, and the lines stay for the next turn all the same."""
+        if _unmentioned_only(lines):
+            log.info("ai turn failed on lines without a mention: nothing said")
+            return
+        self.post(chat, self.t("ai_down"), self.today_keyboard())
+
+    def rest(self, chat: int, seconds: float, quiet: bool = False) -> None:
         """The plugin is out of capacity for `seconds`: say so once, with the wait and the keyboard,
         and run the chat's turn by itself when it is over (`wake`). Its lines stay in
         `pending:<chat>`, so a restart meanwhile still answers them; what arrives meanwhile waits
-        with them and joins that turn."""
+        with them and joins that turn. `quiet`: the turn held only lines without a mention, so
+        nothing is said (a later addressed turn still is told)."""
         seconds = max(float(seconds), BUSY_MIN_S)
         with self._q:
             self._resting[chat] = self.clock() + seconds
-            told = chat in self._told_busy
-            self._told_busy.add(chat)
+            told = chat in self._told_busy or quiet
+            if not quiet:
+                self._told_busy.add(chat)
         log.info("ai busy, retry in %ds", round(seconds))
         if told:
             return
@@ -2228,12 +2242,10 @@ class Bot:
         ]
 
     @staticmethod
-    def new_lines(
-        lines: Sequence[Mapping], seen: Sequence[Mapping], mark: str = NOT_TO_YOU
-    ) -> list[dict]:
+    def new_lines(lines: Sequence[Mapping], seen: Sequence[Mapping]) -> list[dict]:
         """The turn's `new`: the lines for the bot and the group lines it only saw, marked
-        «[not to you]» (`mark`), in the order they came."""
-        items = [(int(r["ts"]), 0, i, mark + r["text"]) for i, r in enumerate(seen)]
+        «[not to you]», in the order they came."""
+        items = [(int(r["ts"]), 0, i, NOT_TO_YOU + r["text"]) for i, r in enumerate(seen)]
         items += [(int(x.get("ts") or 0), 1, i, x["content"]) for i, x in enumerate(lines)]
         return [{"content": c, "ts": _iso(ts)} for ts, _, _, c in sorted(items)]
 
@@ -2243,11 +2255,11 @@ class Bot:
         days = self.profile.history_days or 0
         if days <= 0:
             return []
-        out, mark = [], self.unaddressed_mark
+        out = []
         for r in self.kv.chat_rows(chat, now - days * 86400, upto):
             if r["id"] in skip:
                 continue
-            text = r["text"] if r["role"] == "assistant" or r["asked"] else mark + r["text"]
+            text = r["text"] if r["role"] == "assistant" or r["asked"] else NOT_TO_YOU + r["text"]
             role = "assistant" if r["role"] == "assistant" else "user"
             out.append({"role": role, "content": text, "ts": _iso(r["ts"])})
         return out
