@@ -59,6 +59,30 @@ _OPTIONS = re.compile(r"\n?```options[^\S\n]*\n(.*?)```[^\S\n]*", re.DOTALL)
 REMINDERS_MAX, REMINDER_CHARS = 5, 300  # reminders an answer may offer
 _REMINDERS = re.compile(r"\n?```reminders[^\S\n]*\n(.*?)```[^\S\n]*", re.DOTALL)
 _WHEN = re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}")
+# What the assistant writes, alone, when an answer should send nothing at all (`answer_scope: all`,
+# talk between people with nothing for it). A provider that fails a turn with no text (AIDriver ends
+# one as `no_output`) still gets text; the app drops the word wherever it stands, so it never
+# reaches the chat, and an answer left empty sends nothing and still counts as answered.
+NO_REPLY = "NO_REPLY"
+_NO_REPLY = re.compile(r"[`*_~]*(?<![A-Za-z0-9])NO_REPLY(?![A-Za-z0-9])[`*_~]*")
+# The rules' lines on group messages that do not call the bot, by `answer_scope` (`{unaddressed}`
+# in rules.md; filled in first, so their own placeholders are filled too).
+UNADDRESSED_ASKED = """
+- You may also see what people in the group say to each other: those lines start with
+  "[not to you]" and are context only.
+- When a message from {name} is plainly said to someone else, it is context too.
+"""
+UNADDRESSED_ALL = """
+- A line that starts with "[no mention]" did not mention you or reply to you. In this group it is
+  for you all the same: the household telling you something, or talking among themselves. Take in
+  what it tells you and act on it as you would if you were asked (a day it describes gets its record
+  block). Then answer with only a reaction (react: 👍, for "seen and noted") unless it asks you
+  something or changes what someone has to do; then answer in words, and say briefly that you took
+  note. When it is talk between people with nothing for you, write only {no_reply}: the bot sends
+  nothing to the chat.
+- A mention or a reply to you always gets an answer in words.
+- A "[no mention]" line from someone who is not {name} or {others} is context only.
+"""
 
 
 class PluginError(Exception):
@@ -381,24 +405,36 @@ def rules(
     others: Sequence[str] = (),
     instructions: str = "",
     her_text: bool = False,
+    answer_all: bool = False,
 ) -> str:
     """The shared assistant principles in her language, then `rules.md` filled in. Plain
     replacement, not `str.format`: the text holds JSON braces.
-    `her_text`: every message she writes in the group reaches the assistant, mention or not."""
-    reach = (
-        f"In the group, every message {name} writes reaches you too, because the group is about "
-        f"her cycle; the others' messages reach you only when they mention you, reply to you or "
-        f"send a voice note, a photo or a file."
-        if her_text
-        else "Text without a mention or a reply does not reach you as a message; a voice note, "
-        "a photo or a file always does."
-    )
+    `her_text`: every message she writes in the group reaches the assistant, mention or not.
+    `answer_all` (`answer_scope: all`): every message she or the admins write in the group does,
+    and one without a mention is marked «[no mention]» and may get a reaction or no answer."""
+    family = _join(others) or "her family"
+    if answer_all:
+        reach = (
+            f"In the group, every message {name} or {family} writes reaches you, mention or "
+            f"not; a voice note, a photo or a file always does."
+        )
+    else:
+        reach = (
+            f"In the group, every message {name} writes reaches you too, because the group is "
+            f"about her cycle; the others' messages reach you only when they mention you, reply "
+            f"to you or send a voice note, a photo or a file."
+            if her_text
+            else "Text without a mention or a reply does not reach you as a message; a voice "
+            "note, a photo or a file always does."
+        )
     values = {
+        "unaddressed": (UNADDRESSED_ALL if answer_all else UNADDRESSED_ASKED).strip("\n"),
         "name": name,
         "language_name": LANGUAGE_NAMES.get(language, language),
-        "others": _join(others) or "her family",
+        "others": family,
         "symptom_ids": ", ".join(SYMPTOMS),
         "reach": reach,
+        "no_reply": NO_REPLY,
         "instructions": (instructions or "").strip(),
     }
     text = RULES.read_text(encoding="utf-8")
@@ -416,6 +452,14 @@ def principles(language: str) -> str:
     if not path.is_file():
         path = PRINCIPLES / "en.md"
     return path.read_text(encoding="utf-8").rstrip() + "\n"
+
+
+def drop_no_reply(text: str) -> str:
+    """`text` without the NO_REPLY word (and the formatting around it), stripped: empty when the
+    answer was only that word, so the app sends nothing."""
+    if NO_REPLY not in text:
+        return text
+    return re.sub(r"\n{3,}", "\n\n", _NO_REPLY.sub("", text)).strip()
 
 
 def extract(text: str, kind: str = "record") -> tuple[str, object]:

@@ -121,11 +121,13 @@ ASK_DEFAULT_S = 300  # an ask that names no end of its own waits this long
 NO_ONE = "no one could be asked"  # the note of an ask declined because nobody could answer it
 SETTINGS_KEYS = ("ask_at", "period_max_day")  # what a `settings` block or /hora may change
 HISTORY_SCOPES = ("asked", "all")  # telegram.history_scope: which group messages are logged
+ANSWER_SCOPES = ("asked", "all")  # telegram.answer_scope: which group messages start a turn
 HISTORY_DAYS = 14  # telegram.history_days by default: the recap a fresh conversation starts from
 HISTORY_DAYS_MAX = 60
 CONTEXT_MAX = 50  # unaddressed group lines a turn takes as context, the newest
 LOG_KEEP_DAYS = 7  # the chat log keeps at least this much, for the context lines of a turn
 NOT_TO_YOU = "[not to you] "  # the mark of a group line that did not call the bot
+NO_MENTION = "[no mention] "  # the same mark with `answer_scope: all`, where such a line is for it
 OFFER_GONE = "remind_timeout"  # the label an offer's buttons give way to when nobody answered
 REMIND_TTL_S = 1800  # an offered reminder can be tapped this long; then nothing is done
 REMIND_DAYS = 60  # the furthest ahead a reminder may be
@@ -164,6 +166,7 @@ class Profile:
     username: str | None = None
     admins: Mapping[int, str] = field(default_factory=dict)
     history_scope: str = "asked"
+    answer_scope: str = "asked"
     history_days: int | None = HISTORY_DAYS  # None: not a whole number (profile_errors)
     assistant: Mapping | None = None
     calendar: Mapping = field(default_factory=dict)
@@ -204,6 +207,7 @@ class Profile:
             username=str(username).lstrip("@") if username else None,
             admins={int(k): str(v) for k, v in admins.items()},
             history_scope=str(tg.get("history_scope") or "asked"),
+            answer_scope=str(tg.get("answer_scope") or "asked"),
             history_days=HISTORY_DAYS if days is None else _int(days),
             assistant=dict(block) if isinstance(block, Mapping) else None,
             calendar=dict(calendar) if isinstance(calendar, Mapping) else {},
@@ -303,6 +307,8 @@ def profile_errors(p: Profile, data: str | Path) -> list[str]:
         errors.append("missing_user_id")
     if p.history_scope not in HISTORY_SCOPES:
         errors.append("bad_history_scope")
+    if p.answer_scope not in ANSWER_SCOPES:
+        errors.append("bad_answer_scope")
     if p.history_days is None or not 0 <= p.history_days <= HISTORY_DAYS_MAX:
         errors.append("bad_history_days")
     titles = p.calendar.get("titles") or {}
@@ -1311,6 +1317,8 @@ class Bot:
                 log.info("command %s", entry[0].__name__.removeprefix("cmd_"))
             return
         content = self.addressed(msg, text, private, role)
+        if content is None and not private:
+            content = self.unmentioned(msg, text, role)
         if content is not None:
             self.queue_text(chat["id"], msg, content, role, self._strip_mention(msg, text)[0])
         elif not private:
@@ -1341,10 +1349,22 @@ class Bot:
         of = f" of {_iso(when)}" if type(when) is int and when > 0 else ""
         return f" (replying to {self.sender(reply)}'s {kind}{of})"
 
+    @property
+    def answer_all(self) -> bool:
+        """`answer_scope: all`: her and the admins' group messages start a turn, mention or not."""
+        return self.profile.answer_scope == "all"
+
+    @property
+    def unaddressed_mark(self) -> str:
+        return NO_MENTION if self.answer_all else NOT_TO_YOU
+
     def log_seen(self, chat: int, msg: Mapping, text: str) -> None:
-        """A group message that does not call the bot. With `history_scope: all` the chat log
-        keeps it, and it goes to the next turn as context marked «[not to you]»."""
-        if self.profile.history_scope != "all" or not self.has_assistant:
+        """A group message that does not call the bot. With `history_scope: all` (or
+        `answer_scope: all`) the chat log keeps it, and it goes to the next turn as context
+        marked «[not to you]» («[no mention]» with `answer_scope: all`)."""
+        if self.profile.history_scope != "all" and not self.answer_all:
+            return
+        if not self.has_assistant:
             return
         body = text.strip()
         if body.startswith("/"):
@@ -1376,6 +1396,21 @@ class Bot:
             quoted = reply.get("text") or reply.get("caption") or ""
             prefix += f"[replying to the bot: {quoted}] "
         return prefix + body
+
+    def unmentioned(self, msg: Mapping, text: str, role: str) -> str | None:
+        """With `answer_scope: all`, the line for the assistant of a group text from her or an
+        admin that does not call the bot, marked «[no mention]»: it starts a turn like an
+        addressed one. None in every other case, so the message is only logged: `answer_scope:
+        asked`, no assistant, a bot (itself included) or an empty text."""
+        if not self.answer_all or not self.has_assistant:
+            return None
+        frm = msg.get("from") or {}
+        if frm.get("is_bot") or (self.bot_id is not None and frm.get("id") == self.bot_id):
+            return None
+        body = text.strip()
+        if not body:
+            return None
+        return f"{NO_MENTION}{self.who(role, frm.get('id'))}{self.replied(msg)}: {body}"
 
     def _strip_mention(
         self, msg: Mapping, text: str, entities: str = "entities"
@@ -1969,7 +2004,12 @@ class Bot:
                 plan=plan,
             )
             rules = assistant.rules(
-                p.name, p.language, admins, block_cfg.get("instructions") or "", self.read_all
+                p.name,
+                p.language,
+                admins,
+                block_cfg.get("instructions") or "",
+                self.read_all,
+                answer_all=self.answer_all,
             )
             rules += "\n\n" + gestures.guide(
                 p.language, p.style, bool(p.sticker_set), p.photo_hosts
@@ -1979,7 +2019,7 @@ class Bot:
                 rules,
                 context,
                 log_text,
-                self.new_lines(lines, seen),
+                self.new_lines(lines, seen, self.unaddressed_mark),
                 self.history(chat, now_ts, last_row, rows | {r["id"] for r in seen}),
                 attachments=atts,
                 chat_id=chat,
@@ -2028,6 +2068,7 @@ class Bot:
         text, settings = assistant.extract(text, "settings")
         text, offered = assistant.extract_options(text)
         text, listed = assistant.extract_reminders(text)
+        text = assistant.drop_no_reply(text)  # a deliberate silence: nothing to send
         offered = reply.options or offered
         listed = reply.reminders or listed
         users = _users(covered)
@@ -2187,10 +2228,12 @@ class Bot:
         ]
 
     @staticmethod
-    def new_lines(lines: Sequence[Mapping], seen: Sequence[Mapping]) -> list[dict]:
+    def new_lines(
+        lines: Sequence[Mapping], seen: Sequence[Mapping], mark: str = NOT_TO_YOU
+    ) -> list[dict]:
         """The turn's `new`: the lines for the bot and the group lines it only saw, marked
-        «[not to you]», in the order they came."""
-        items = [(int(r["ts"]), 0, i, NOT_TO_YOU + r["text"]) for i, r in enumerate(seen)]
+        «[not to you]» (`mark`), in the order they came."""
+        items = [(int(r["ts"]), 0, i, mark + r["text"]) for i, r in enumerate(seen)]
         items += [(int(x.get("ts") or 0), 1, i, x["content"]) for i, x in enumerate(lines)]
         return [{"content": c, "ts": _iso(ts)} for ts, _, _, c in sorted(items)]
 
@@ -2200,11 +2243,11 @@ class Bot:
         days = self.profile.history_days or 0
         if days <= 0:
             return []
-        out = []
+        out, mark = [], self.unaddressed_mark
         for r in self.kv.chat_rows(chat, now - days * 86400, upto):
             if r["id"] in skip:
                 continue
-            text = r["text"] if r["role"] == "assistant" or r["asked"] else NOT_TO_YOU + r["text"]
+            text = r["text"] if r["role"] == "assistant" or r["asked"] else mark + r["text"]
             role = "assistant" if r["role"] == "assistant" else "user"
             out.append({"role": role, "content": text, "ts": _iso(r["ts"])})
         return out
@@ -2245,6 +2288,7 @@ class Bot:
             self.post(chat, self.t("later_failed"))
             return
         log.info("later done %ds", round(time.monotonic() - started))
+        out = assistant.drop_no_reply(out)
         if out.strip() and self.say(chat, out.strip(), None):
             self.kv.add_chat(chat, "assistant", None, out.strip(), int(self.now().timestamp()))
 
@@ -3055,6 +3099,8 @@ class Bot:
             log.info("edit: answered message")
             return
         content = self.addressed(msg, text, private, role)
+        if content is None and not private:
+            content = self.unmentioned(msg, text, role)
         if content is not None:
             row = None
             if logged is not None:  # logged before (seen, or answered long ago): one row
