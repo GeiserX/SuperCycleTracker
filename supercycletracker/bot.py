@@ -1404,12 +1404,17 @@ class Bot:
         """With `answer_scope: all`, the line for the assistant of a group text from her or an
         admin that does not call the bot, marked «[no mention]»: it starts a turn like an
         addressed one. None in every other case, so the message is only logged: `answer_scope:
-        asked`, no assistant, a bot (itself included) or an empty text."""
+        asked`, no assistant, a bot (itself included), an empty text, or a bare mention or reply
+        to the bot (which `addressed` left out for having no words)."""
         if not self.answer_all or not self.has_assistant:
             return None
         frm = msg.get("from") or {}
         if frm.get("is_bot") or (self.bot_id is not None and frm.get("id") == self.bot_id):
             return None
+        reply = msg.get("reply_to_message") or {}
+        to_bot = self.bot_id is not None and (reply.get("from") or {}).get("id") == self.bot_id
+        if to_bot or self._strip_mention(msg, text)[1]:
+            return None  # it calls the bot, with nothing more to say: as in `asked`
         body = text.strip()
         if not body:
             return None

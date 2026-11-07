@@ -339,3 +339,19 @@ def test_a_busy_plugin_on_unmentioned_lines_says_nothing(make_bot):
     group_text(bot, "¿vienes a cenar, Lucía?")
     assert sent(bot) == []
     assert len(bot.kv.get_json(f"pending:{GROUP}")) == 1
+
+
+def test_formatting_that_does_not_wrap_no_reply_stays_balanced():
+    # MUT: strip any `*_~ next to the token → "*bold *" loses its closing mark
+    assert assistant.drop_no_reply("*bold NO_REPLY*") == "*bold *"
+    assert assistant.drop_no_reply("Hecho. **NO_REPLY**") == "Hecho."
+
+
+def test_a_mention_alone_is_not_an_unmentioned_line(make_bot):
+    # MUT: drop the mention check in `unmentioned` → "[no mention] Marta: @bot" starts a turn
+    bot = make_bot(profile=ALL)
+    msg = message("@example_cycle_bot")
+    msg["entities"] = [{"type": "mention", "offset": 0, "length": 18}]
+    bot.handle({"message": msg})
+    bot.join_idle()
+    assert plugin(bot).CALLS == [] and sent(bot) == []

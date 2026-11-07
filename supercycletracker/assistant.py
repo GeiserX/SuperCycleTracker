@@ -64,7 +64,9 @@ _WHEN = re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}")
 # one as `no_output`) still gets text; the app drops the word wherever it stands, so it never
 # reaches the chat, and an answer left empty sends nothing and still counts as answered.
 NO_REPLY = "NO_REPLY"
-_NO_REPLY = re.compile(r"[`*_~]*(?<![A-Za-z0-9])NO\\?_REPLY(?![A-Za-z0-9])[`*_~]*")
+_NO_REPLY = re.compile(
+    r"(?<![A-Za-z0-9])([`*_~]*)NO\\?_REPLY\1(?![A-Za-z0-9])"
+)  # marks that wrap it
 _EMPTY_FENCE = re.compile(r"```[^\n`]*\n\s*```")
 # The rules' lines on group messages that do not call the bot, by `answer_scope` (`{unaddressed}`
 # in rules.md; filled in first, so their own placeholders are filled too).
