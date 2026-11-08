@@ -465,7 +465,8 @@ gets words, never only 👀: when such a turn showed nothing, the bot posts `rea
 No tengo nada que añadir.») as a reply to the newest one, and the turn's other messages get 👀. Not
 `send_failed`: nothing failed, the assistant chose no words, and the rules tell it a mention, a
 reply or a voice note always gets words. A pending line records whether it called the bot (`asks`);
-a sticker, GIF or photo without a mention does not, so silence on it gets 👀, not an error.
+a sticker, GIF or photo without a mention does not, so silence on it gets 👀, not an error. An edit that adds a mention to an answered line counts as calling the bot, on the message it
+edits; a plain edit does not.
 A failed turn (an exception, a timeout, `kept: false`, a busy plugin) puts no 👀, since nothing was
 read: its lines stay in `pending:<chat>` and go with the next turn. Private chats and `asked` keep
 the 0.8 behaviour: an empty answer shows nothing there. The word

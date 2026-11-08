@@ -493,15 +493,15 @@ def _people(lines: Sequence[Mapping]) -> list[int]:
 
 def _asking(lines: Sequence[Mapping]) -> list[int]:
     """The messages among `lines` that called the bot (a mention, a reply to it, a command, a
-    voice note): they always get words. A photo, sticker or file without a mention does not.
-    A line queued by 0.8 has no `asks`: then any line not marked «[no mention]» did."""
-    return [
-        x["id"]
+    voice note, an edit that addresses it): they always get words. A photo, sticker or file
+    without a mention does not. A line queued by 0.8 has no `asks`: then any line not marked
+    «[no mention]» did. An edit counts as the message it edited."""
+    mids = [
+        _mid(x)
         for x in lines
-        if isinstance(x.get("id"), int)
-        and not x.get("tap")
-        and x.get("asks", not str(x.get("content", "")).startswith(NO_MENTION))
+        if not x.get("tap") and x.get("asks", not str(x.get("content", "")).startswith(NO_MENTION))
     ]
+    return list(dict.fromkeys(m for m in mids if isinstance(m, int)))
 
 
 def _unmentioned_only(lines: Sequence[Mapping]) -> bool:
@@ -3128,12 +3128,15 @@ class Bot:
             return
         key = f"pending:{chat_id}"
         found: list[dict] = []
+        calls = self.addressed(msg, text, private, role) is not None  # the edit calls the bot
 
         def swap(cur):
             out = []
             for x in cur or []:
                 if x.get("id") == mid and "content" in x and "body" in x:
                     found.append(dict(x))
+                    if calls:
+                        x = {**x, "asks": True}
                     if _words(x["body"]) != _words(body):
                         head = x["content"][: len(x["content"]) - len(x["body"])]
                         if not x["content"].endswith(x["body"]):
@@ -3157,7 +3160,7 @@ class Bot:
             self.worker.submit(chat_id)
             log.info("edit: queued line")
             return
-        line = {"mid": mid, "admin": role == ADMIN, "uid": user, "body": body}
+        line = {"mid": mid, "admin": role == ADMIN, "uid": user, "body": body, "asks": calls}
         line["ts"] = int(self.now().timestamp())
         line["id"] = f"e{mid}.{secrets.token_hex(3)}"
         if running:

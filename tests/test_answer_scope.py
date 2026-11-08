@@ -655,3 +655,30 @@ def test_an_unchanged_record_with_a_gesture_that_fails_still_marks_the_line_read
     assert bot.repo.log_path.read_bytes() == before  # the day already said so
     assert bot.tg.of("sendSticker") == [] and sent(bot) == []
     assert reactions(bot) == [(msg["message_id"], "👀")]
+
+
+def test_an_edit_that_adds_a_mention_to_an_answered_line_gets_words_when_left_silent(make_bot):
+    # MUT: `"asks": False` on the edit line in on_edit → the edit that calls the bot gets 👀
+    bot = make_bot(profile=ALL)
+    plugin(bot).REPLIES[:] = ["Vale.", "NO_REPLY"]
+    msg = group_text(bot, "quedan 10 raciones")
+    mention = [{"type": "mention", "offset": 0, "length": 18}]
+    text = "@example_cycle_bot quedan 8 raciones"
+    bot.handle({"edited_message": {**msg, "text": text, "entities": mention}})
+    bot.join_idle()
+    assert len(plugin(bot).CALLS) == 2
+    said = sent(bot)[-1]
+    assert said["text"] == bot.t("read_no_answer")
+    assert said["reply_parameters"]["message_id"] == msg["message_id"]
+    assert reactions(bot) == []
+
+
+def test_a_plain_edit_of_an_answered_line_left_silent_is_marked_read(make_bot):
+    # MUT: `_asking` keeps the 0.8 rule for edit lines → the plain edit gets «read_no_answer»
+    bot = make_bot(profile=ALL)
+    plugin(bot).REPLIES[:] = ["Vale.", "NO_REPLY"]
+    msg = group_text(bot, "quedan 10 raciones")
+    bot.handle({"edited_message": {**msg, "text": "quedan 8 raciones"}})
+    bot.join_idle()
+    assert bot.tg.texts() == ["Vale."]
+    assert reactions(bot) == [(msg["message_id"], "👀")]
