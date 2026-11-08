@@ -428,10 +428,12 @@ is a group admin.
 The rules tell the assistant what such a line wants: take in what it says and act on it as if asked
 (a day it describes gets its record block), then answer with only a reaction (👍, "seen and noted")
 unless it asks something or changes what someone has to do, in which case answer in words and say
-it took note. Talk between people with nothing for the assistant gets no answer at all: the
-assistant writes only `NO_REPLY`. A mention or a reply to the bot always gets words. The reaction is
-the assistant's own, after reading, through the `telegram` block (gestures.py); the bot never reacts
-on arrival. With several lines in one turn it goes on the last one. Principle 1 of the shared
+it took note. Talk between people with nothing for the assistant gets no words: the assistant writes
+only `NO_REPLY`, and the bot marks the messages 👀 («read»). A mention or a reply to the bot always
+gets words. The reaction is the assistant's own, after reading, through the `telegram` block
+(gestures.py); the bot never reacts on arrival. In the group, an answer with no text puts its
+reaction on every person's message the turn covered, the lines it started with and those handed over
+mid-turn alike; an answer with text reacts on the last one, as in `asked`. Principle 1 of the shared
 principles says the rest of the chat is never answered and that no rule overrides it, so in this
 mode the app renders principle 1 scoped (`assistant.PRINCIPLE_1_ALL`): the household's lines are
 addressed to the assistant mention or not, and `[not to you]` lines stay context. The shared files
@@ -442,12 +444,27 @@ says nothing in the group: no `ai_down` and no `ai_busy` in the middle of the ho
 lines stay in `pending:<chat>` and go with the next turn, as after any failed turn. A turn with an
 addressed line in it posts the notice as before.
 
-**No answer.** The app removes the word `NO_REPLY` (with any formatting around it, and `NO\_REPLY`)
-from every answer and every `later` text before sending, so it never reaches the chat. When nothing
-but punctuation, quotes, brackets or an empty code fence is left (`NO_REPLY.`, `«NO_REPLY»`, a fenced
-`NO_REPLY`), the answer is empty. An answer left with no text and
-no gesture sends nothing, posts no `ai_down`, is not retried, and still counts as answered: the
-conversation is kept and the lines leave `pending:<chat>`, so they are not sent again. The word
+**No words, never nothing.** The app removes the word `NO_REPLY` (with any formatting around it, and
+`NO\_REPLY`) from every answer and every `later` text before sending, so it never reaches the chat.
+When nothing but punctuation, quotes, brackets or an empty code fence is left (`NO_REPLY.`,
+`«NO_REPLY»`, a fenced `NO_REPLY`), the answer is empty. An empty answer posts no `ai_down`, is not
+retried, and still counts as answered: the conversation is kept and the lines leave
+`pending:<chat>`, so they are not sent again.
+
+With `answer_scope: all`, a person's message in the group is never left with nothing visible. When a
+kept turn showed nothing in the chat (no text, no reaction, sticker, photo or file, no «Anotado:»,
+no settings or reminder message), the bot puts 👀 on every person's message the turn covered (texts,
+voice notes, photos and files by their own id, an edit on the message edited; a tap is on the bot's
+own message and gets none). That covers `NO_REPLY`, an empty answer (the private plugin's own
+silence word arrives as `""`), an empty `telegram` block, choices with no text to carry them, and a
+record block that changed nothing. Where Telegram refuses 👀 on a message (the chat's allowed
+reactions, a deleted message), the bot tries 👍 once on that message, then logs the refusal and
+goes on; it never posts a text instead. A message that called the bot (a mention, a reply to it, a
+voice note, a photo or file) gets words, never only 👀: when such a turn showed nothing, the bot
+posts `send_failed` as a reply to the newest one, and only the turn's `[no mention]` messages get 👀.
+A failed turn (an exception, a timeout, `kept: false`, a busy plugin) puts no 👀, since nothing was
+read: its lines stay in `pending:<chat>` and go with the next turn. Private chats and `asked` keep
+the 0.8 behaviour: an empty answer shows nothing there. The word
 exists because a provider may fail a turn whose session wrote no text (AIDriver ends one as
 `no_output`, and counts a message handed in mid-turn as answered only when text follows it); a
 plugin that returns `""` gets the same clean result.
@@ -1259,7 +1276,7 @@ joins a group or its abilities change.
 | `test_turns.py` | section 5.2: one answer per burst, lines handed to a running turn, edits, choices as buttons, asks; a line queued before a restart and a turn killed mid-flight are answered by the next process |
 | `test_gestures.py` | the renderer (folds, quotes, code with its language, hostile markup never opening a tag), the gestures block on hostile model output (dropped), the HTML send and its plain-text resend, a reaction alone sends no text and a failed one sends the emoji, files and a refused file never losing the text, a file name with no letter named in her language, stickers only from the profile's set, photos only from `photo_hosts`, the voice reaching the rules |
 | `test_offers.py` | the chat log: group talk goes to the next turn as `[not to you]` context once and is never answered, nothing is kept with `asked`, a failed turn keeps it, the recap leaves out the new lines and reaches back `history_days` only (0: none), edits rewrite the log and one that adds the mention keeps one row, `/nuevo` forgets it; an offer says no answer does nothing and expires into «Sin respuesta: nada»; the rules say who reaches the assistant; the calendar plan's dates (and none once late), its place in `context.md`, its offer once per key in waking hours with configurable titles, one tap approving exactly its entries, a moved plan offered again, «Nada» and strangers; reminders offered (past ones dropped, the calendar button only when set), posted once at their time, late after a restart, listed and cancelled, expiring, the calendar button approving that one addition and no other time, only for the person answered, and the block parsed strictly |
-| `test_answer_scope.py` | with `answer_scope: all` a group text without a mention from her or an admin starts a turn marked `[no mention]` (a reply to someone else's message named), a burst of them is one turn and a reaction-only answer sends no text and reacts on the last, one arriving mid-turn joins the running turn, a bot (itself, one listed as admin) and a stranger never start one and reach the next turn as `[not to you]` context, a stranger named like her stays `[not to you]` beside a household `[no mention]` line, her plain text with `read_all` is a `[no mention]` line, all mode renders principle 1 scoped, a failed or busy turn of only `[no mention]` lines posts nothing and keeps them pending while one with an addressed line still posts `ai_down`, `NO_REPLY` with punctuation, quotes, brackets, an escape or a code fence around it is silence while marks that do not wrap it stay, a bare mention is no `[no mention]` line, `NO_REPLY` sends nothing, posts no error, keeps the conversation and is not sent again, and is cut out of any answer it appears in, an edit of an answered line asks to check the answer and one answered with a reaction goes again as one row, `asked` keeps `[not to you]` and answers nothing, no assistant answers nothing, `bad_answer_scope`, and the all-mode rules |
+| `test_answer_scope.py` | with `answer_scope: all` a group text without a mention from her or an admin starts a turn marked `[no mention]` (a reply to someone else's message named), a burst of them is one turn and a reaction-only answer sends no text and reacts on every covered message, a line handed over mid-turn too, one arriving mid-turn joins the running turn, a bot (itself, one listed as admin) and a stranger never start one and reach the next turn as `[not to you]` context, a stranger named like her stays `[not to you]` beside a household `[no mention]` line, her plain text with `read_all` is a `[no mention]` line, all mode renders principle 1 scoped, a failed or busy turn of only `[no mention]` lines posts nothing and keeps them pending while one with an addressed line still posts `ai_down`, `NO_REPLY` with punctuation, quotes, brackets, an escape or a code fence around it is silence while marks that do not wrap it stay, a bare mention is no `[no mention]` line, `NO_REPLY` sends nothing, posts no error, keeps the conversation and is not sent again, and is cut out of any answer it appears in, an edit of an answered line asks to check the answer and one answered with a reaction goes again as one row, `asked` keeps `[not to you]` and answers nothing, no assistant answers nothing, `bad_answer_scope`, and the all-mode rules; never silent: `NO_REPLY`, an empty answer, an empty gestures block, choices without text and a record that changed nothing put 👀 on every covered message (handed-over ones too), a text answer or an «Anotado:» adds none, a refused 👀 tries 👍 once and never posts text, a turn with a reply to the bot that shows nothing posts `send_failed` to it and 👀 only on the `[no mention]` lines, a failed or busy turn reacts nothing and its lines go with the next, `asked` and private chats never get 👀, and the rules say `NO_REPLY` marks the messages read |
 | `test_i18n.py`, `test_privacy.py` | sections 7 and 11 |
 
 Each CI gate (ruff, pytest) is shown failing once on a mutated line before it is trusted.

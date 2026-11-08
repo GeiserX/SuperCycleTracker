@@ -128,6 +128,8 @@ CONTEXT_MAX = 50  # unaddressed group lines a turn takes as context, the newest
 LOG_KEEP_DAYS = 7  # the chat log keeps at least this much, for the context lines of a turn
 NOT_TO_YOU = "[not to you] "  # the mark of a group line that did not call the bot
 NO_MENTION = "[no mention] "  # the same mark with `answer_scope: all`, where such a line is for it
+READ = "👀"  # `answer_scope: all`: put on every message a turn read when it showed nothing
+NOTED = "👍"  # tried once on a message whose chat refuses another reaction
 OFFER_GONE = "remind_timeout"  # the label an offer's buttons give way to when nobody answered
 REMIND_TTL_S = 1800  # an offered reminder can be tapped this long; then nothing is done
 REMIND_DAYS = 60  # the furthest ahead a reminder may be
@@ -480,6 +482,25 @@ def _mid(line: Mapping) -> int | None:
     if "mid" in line:
         return line["mid"]
     return line["id"] if isinstance(line.get("id"), int) else None
+
+
+def _people(lines: Sequence[Mapping]) -> list[int]:
+    """The people's messages a turn's lines are: a text, voice note, photo or file (its own id)
+    and an edit (the message edited). A tap is none: its message is the bot's."""
+    mids = [_mid(x) for x in lines if not x.get("tap")]
+    return list(dict.fromkeys(m for m in mids if isinstance(m, int)))
+
+
+def _asking(lines: Sequence[Mapping]) -> list[int]:
+    """The messages among `lines` that called the bot (a mention, a reply to it, a voice note, a
+    photo or file, her text when the bot reads the group): they always get words."""
+    return [
+        x["id"]
+        for x in lines
+        if isinstance(x.get("id"), int)
+        and not x.get("tap")
+        and not str(x.get("content", "")).startswith(NO_MENTION)
+    ]
 
 
 def _unmentioned_only(lines: Sequence[Mapping]) -> bool:
@@ -2089,12 +2110,17 @@ class Bot:
         if text:
             self.kv.add_chat(chat, "assistant", None, text, int(self.now().timestamp()))
         others = block is not None or settings or offered or listed  # each says something
-        self.act(chat, acts, _mid(covered[-1]), bool(text or others), reply_to)
+        # `answer_scope: all` in the group: a person's message is never left with nothing shown
+        people = _people(covered) if self.answer_all and chat == self.chat_id else []
+        everyone = people if people and not text else None  # a reaction alone goes on each
+        shown = self.act(chat, acts, _mid(covered[-1]), bool(text or others), reply_to, everyone)
+        shown = shown or bool(text)
         if block is not None:
             source = "admin" if all(x.get("admin") for x in covered) else "telegram"
-            self.apply_block(chat, block, source, today)
+            shown = self.apply_block(chat, block, source, today) or shown
         if settings is not None:
             self.apply_settings(chat, settings)
+            shown = True  # it says what changed, or why not
         if text:
             self.remember(chat, covered, text)
         # last, so a crash before here sends the lines again; a block applied twice changes
@@ -2104,7 +2130,9 @@ class Bot:
         if seen:  # the context lines went with a turn that was kept: not again
             self.kv.set(f"ctx:{chat}", str(max(r["id"] for r in seen)))
         if listed:
-            self.offer_reminders(chat, listed, covered, reply_to)
+            shown = self.offer_reminders(chat, listed, covered, reply_to) or shown
+        if people and not shown:
+            self.mark_read(chat, covered, people)
         missed = len(state.pulled) - len(handed)
         if handed or missed:
             log.info("handed over: covered=%d next_turn=%d", len(handed), missed)
@@ -2112,6 +2140,41 @@ class Bot:
             job = reply.later
             self.later.submit(lambda: self.run_later(chat, job))
             log.info("later queued")
+
+    def mark_read(self, chat: int, covered: Sequence[Mapping], people: Sequence[int]) -> None:
+        """`answer_scope: all`: a turn that showed nothing (`NO_REPLY`, an empty answer, a record
+        that changed nothing, buttons with no text to carry them) puts 👀 on every person's
+        message it covered, «read», never a text. A message that called the bot gets words: the
+        answer failed it, so «send_failed» as a reply to the newest such message, and no 👀."""
+        asking = _asking(covered)
+        if asking:
+            note = {"message_id": asking[-1], "allow_sending_without_reply": True}
+            self.post(chat, html.escape(self.t("send_failed")), reply_parameters=note)
+            log.info("ai turn showed nothing for an addressed message: send_failed")
+        read = [m for m in people if m not in asking]
+        if read:
+            self.react(chat, read, READ)
+            log.info("ai turn showed nothing: read mark on %d", len(read))
+
+    def react(self, chat: int, mids: Sequence[int], emoji: str) -> int:
+        """Put `emoji` on each message of `mids`. Where Telegram refuses it (the chat's allowed
+        reactions, a deleted message) 👍 is tried once instead, then the refusal is logged and
+        the next message goes on. How many messages got a reaction."""
+        done = 0
+        for mid in mids:
+            for one in dict.fromkeys((emoji, NOTED)):
+                try:
+                    self.tg.call(
+                        "setMessageReaction",
+                        chat_id=chat,
+                        message_id=mid,
+                        reaction=[{"type": "emoji", "emoji": one}],
+                    )
+                    done += 1
+                    break
+                except TelegramError as e:
+                    log.info("reaction failed: %s", safe(e))
+        return done
 
     def tell_down(self, chat: int, lines: Sequence[Mapping]) -> None:
         """A failed turn: «ai_down» with the keyboard. Not when every line is household talk
@@ -2725,10 +2788,11 @@ class Bot:
 
     def offer_reminders(
         self, chat: int, listed: Sequence[Mapping], covered: Sequence[Mapping], reply_to
-    ) -> None:
+    ) -> bool:
         """One message with the reminders an answer listed, buttons for each. Nothing happens
         until a tap; untapped, the offer expires (REMIND_TTL_S) and nothing is done. A reminder
-        is for the person the answer was for (her, when it was for several)."""
+        is for the person the answer was for (her, when it was for several). True when the
+        offer was posted."""
         now = self.now().timestamp()
         items = []
         for r in listed:
@@ -2739,7 +2803,7 @@ class Bot:
             if now + 60 <= at.timestamp() <= now + REMIND_DAYS * 86400:
                 items.append({"at": at.timestamp(), "text": r["text"], "done": None})
         if not items:
-            return
+            return False
         users = _users(covered)
         uid = users[0] if len(users) == 1 else self.profile.user_id
         many = len(items) > 1
@@ -2761,10 +2825,11 @@ class Bot:
         text = self.t("remind_offer" if name else "remind_offer_nobody", name=name, lines=lines)
         sent = self.post(chat, text, _keyboard(self.remind_rows(offer)), reply_parameters=where)
         if sent is None:
-            return
+            return False
         offer["msg"] = sent.get("message_id")
         self.keep_offer(chat, offer)
         log.info("reminders offered n=%d", len(items))
+        return True
 
     def tapped_remind(self, cq: Mapping, chat: int, data: str, user: object, role: str) -> None:
         """Where an offered reminder goes: here (stored, posted at its time), in the calendar (a
@@ -3299,15 +3364,23 @@ class Bot:
         return True
 
     def act(
-        self, chat: int, acts: Mapping, to: int | None, texted: bool, reply_to: int | None = None
-    ) -> None:
+        self,
+        chat: int,
+        acts: Mapping,
+        to: int | None,
+        texted: bool,
+        reply_to: int | None = None,
+        everyone: Sequence[int] | None = None,
+    ) -> bool:
         """What the answer's gestures block asks for (gestures.py), each on its own after the
         text, so a file or a reaction Telegram refuses never loses the answer. A reaction goes on
         message `to`. When the answer said nothing and none of it reached the chat (no message to
         react to, a refusal, no sticker set), the emoji is said instead, or that it could not be
-        sent, so the chat always hears back."""
+        sent, so the chat always hears back. `everyone` (`answer_scope: all`, an answer with no
+        text): the reaction goes on each of those messages, 👍 where one refuses it. True when
+        something reached the chat."""
         if not any(acts.values()):
-            return
+            return False
         shown = texted
         for doc in acts["documents"]:
             try:
@@ -3335,7 +3408,10 @@ class Bot:
                 shown = True
             except TelegramError as e:
                 log.warning("%s failed: %s", method, safe(e))
-        if acts["react"] and to is not None:
+        if acts["react"] and everyone:
+            if self.react(chat, everyone, acts["react"]):
+                return True
+        elif acts["react"] and to is not None:
             try:
                 self.tg.call(
                     "setMessageReaction",
@@ -3343,7 +3419,7 @@ class Bot:
                     message_id=to,
                     reaction=[{"type": "emoji", "emoji": acts["react"]}],
                 )
-                return
+                return True
             except TelegramError as e:
                 log.info("reaction failed: %s", safe(e))
         if not shown:
@@ -3353,6 +3429,7 @@ class Bot:
             said = acts["react"] or acts["sticker"]
             text = html.escape(said) if said else html.escape(self.t("send_failed"))
             self.post(chat, text, reply_parameters=note)
+        return True
 
     def sticker(self, emoji: str | None) -> str | None:
         """The file_id of the profile's sticker set for `emoji`, read once per set, or None."""
@@ -3367,9 +3444,10 @@ class Bot:
                 return None
         return gestures.sticker_for(self._stickers.get("set"), emoji)
 
-    def apply_block(self, chat: int, block: object, source: str, today: date) -> None:
+    def apply_block(self, chat: int, block: object, source: str, today: date) -> bool:
         """Validate and write a record block, all or nothing, then «Anotado:» from the
-        `Change` (none when nothing changed), the closing line and the pain red flag."""
+        `Change` (none when nothing changed), the closing line and the pain red flag. True when
+        it posted something."""
         try:
             if block is assistant.BAD_BLOCK:
                 raise BlockError("bad_json")
@@ -3378,15 +3456,16 @@ class Bot:
         except BlockError as e:
             log.warning("block refused: %s", e.code)
             self.post(chat, self.t("invalid_block"), self.today_keyboard())
-            return
+            return True
         except (ValueError, OSError) as e:  # an unreadable log, or the disk refused the write
             log.warning("block failed: %s", safe(e))
             self.post(chat, self.t("invalid_block"), self.today_keyboard())
-            return
+            return True
         text = self.recorded_text(change)
         if text:
             self.post(chat, text)
-        self.announce(change, chat)
+        self.announce(change, chat)  # it posts only on a change, which «Anotado:» shows
+        return bool(text)
 
     # --- settings ------------------------------------------------------------------------
 

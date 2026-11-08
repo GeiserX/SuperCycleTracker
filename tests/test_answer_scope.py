@@ -45,6 +45,38 @@ def sent(bot):
     return bot.tg.of("sendMessage")
 
 
+def reactions(bot):
+    return [(r["message_id"], r["reaction"][0]["emoji"]) for r in bot.tg.of("setMessageReaction")]
+
+
+def addressed(text, user=HER):
+    """A reply to the bot's question: a message that called it."""
+    msg = message(text, user=user)
+    msg["reply_to_message"] = {"message_id": 1, "from": {"id": BOT_ID}, "text": QUESTION}
+    return msg
+
+
+def burst(bot, first, *rest, reply=None, during=None):
+    """`first`, then each of `rest` a second apart within the debounce: one turn. `during`
+    arrives while that turn runs and is handed over (and covered) when `reply` is a str."""
+    bot.debounce_s = 2.5
+    fake_time(bot, {1.0 + n: (lambda m=m: bot.handle({"message": m})) for n, m in enumerate(rest)})
+    mod = plugin(bot)
+    if during is not None:
+
+        def handover(turn):
+            bot.handle({"message": during})
+            got = turn["incoming"]()
+            return {"text": reply, "conversation": "c", "kept": True, "covers": [got[0]["id"]]}
+
+        mod.REPLIES[:] = [handover]
+    elif reply is not None:
+        mod.REPLIES[:] = [reply]
+    bot.handle({"message": first})
+    bot.join_idle()
+    return mod.CALLS
+
+
 def test_an_unmentioned_line_starts_a_turn_marked_no_mention(make_bot):
     # MUT: drop the `unmentioned` fallback in on_message → no call
     bot = make_bot(profile=ALL)
@@ -71,14 +103,15 @@ def test_her_unmentioned_line_and_a_reply_to_someone_else_are_marked(make_bot):
     ]
 
 
-def test_a_burst_of_unmentioned_lines_is_one_turn_and_a_reaction_goes_on_the_last(make_bot):
-    # MUT: `_mid(covered[0])` instead of `_mid(covered[-1])` in the act call → reaction on the first
+def test_a_burst_of_unmentioned_lines_is_one_turn_and_a_reaction_goes_on_each(make_bot):
+    # MUT: pass `everyone=None` to act in _converse → the reaction goes on the last only
     bot = make_bot(profile=ALL)
     bot.debounce_s = 2.5
     second = message("y he sacado 100 g de merluza", user=HER)
     fake_time(bot, {1.0: lambda: bot.handle({"message": second})})
     plugin(bot).REPLIES[:] = [REACT]
-    bot.handle({"message": message("quedan 10 raciones de lasaña")})
+    first = message("quedan 10 raciones de lasaña")
+    bot.handle({"message": first})
     bot.join_idle()
     calls = plugin(bot).CALLS
     assert len(calls) == 1
@@ -87,9 +120,7 @@ def test_a_burst_of_unmentioned_lines_is_one_turn_and_a_reaction_goes_on_the_las
         "[no mention] Lucía: y he sacado 100 g de merluza",
     ]
     assert sent(bot) == []  # a reaction only: no text
-    [r] = bot.tg.of("setMessageReaction")
-    assert r["message_id"] == second["message_id"]
-    assert r["reaction"] == [{"type": "emoji", "emoji": "👍"}]
+    assert reactions(bot) == [(first["message_id"], "👍"), (second["message_id"], "👍")]
     assert bot.kv.get_json(f"pending:{GROUP}") is None
 
 
@@ -134,15 +165,15 @@ def test_bots_and_strangers_never_start_a_turn_and_stay_context_marked_not_to_yo
     ]
 
 
-def test_no_reply_sends_nothing_raises_nothing_and_counts_as_answered(make_bot):
+def test_no_reply_sends_no_text_marks_read_and_counts_as_answered(make_bot):
     # MUT: drop `drop_no_reply` in _converse → "NO_REPLY" is sent to the chat
     bot = make_bot(profile=ALL)
     mod = plugin(bot)
     mod.REPLIES[:] = [{"text": "NO_REPLY", "conversation": "c1", "kept": True}]
-    group_text(bot, "¿vienes a cenar, Lucía?")
+    msg = group_text(bot, "¿vienes a cenar, Lucía?")
     assert len(mod.CALLS) == 1
     assert sent(bot) == []  # no text, no «ai_down», no «try again»
-    assert bot.tg.of("setMessageReaction") == []
+    assert reactions(bot) == [(msg["message_id"], "👀")]  # read
     assert bot.kv.get_json(f"pending:{GROUP}") is None  # handled: not sent again
     assert bot.kv.get(f"conv:{GROUP}") == "c1"  # the conversation keeps the turn
     group_text(bot, "quedan 10 raciones")
@@ -355,3 +386,175 @@ def test_a_mention_alone_is_not_an_unmentioned_line(make_bot):
     bot.handle({"message": msg})
     bot.join_idle()
     assert plugin(bot).CALLS == [] and sent(bot) == []
+
+
+# --- never silent: with answer_scope all, a person's message always shows something -------------
+
+
+def test_a_reaction_only_answer_goes_on_a_line_that_joined_mid_turn_too(make_bot):
+    # MUT: `everyone = None` in _converse → only the last covered message gets the reaction
+    bot = make_bot(profile=ALL)
+    a, b, late = message("quedan 10 raciones"), message("y 2 yogures", user=HER), message("y pan")
+    calls = burst(bot, a, b, reply=REACT, during=late)
+    assert len(calls) == 1 and sent(bot) == []
+    ids = [a["message_id"], b["message_id"], late["message_id"]]
+    assert reactions(bot) == [(m, "👍") for m in ids]
+    assert bot.kv.get_json(f"pending:{GROUP}") is None
+
+
+def test_no_reply_marks_every_covered_message_read(make_bot):
+    # MUT: drop `self.mark_read(...)` in _converse → nothing shows under any of them
+    bot = make_bot(profile=ALL)
+    a, b, late = message("¿vienes a cenar?"), message("sí, a las 9", user=HER), message("vale")
+    calls = burst(bot, a, b, reply="NO_REPLY", during=late)
+    assert len(calls) == 1 and sent(bot) == []
+    ids = [a["message_id"], b["message_id"], late["message_id"]]
+    assert reactions(bot) == [(m, "👀") for m in ids]
+    assert bot.kv.get_json(f"pending:{GROUP}") is None
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"text": "", "conversation": "c", "kept": True},  # the private plugin's «(sin respuesta)»
+        "",  # a plugin that returns an empty string
+        "```telegram\n```",  # an empty gestures block
+        "```options\nSí\nNo\n```",  # buttons with no text to carry them
+    ],
+)
+def test_every_answer_that_would_show_nothing_marks_the_lines_read(make_bot, answer):
+    # MUT: `if people and shown:` in _converse → the empty answer leaves them with nothing
+    bot = make_bot(profile=ALL)
+    plugin(bot).REPLIES[:] = [answer]
+    msg = group_text(bot, "¿compras pan?")
+    assert sent(bot) == []
+    assert reactions(bot) == [(msg["message_id"], "👀")]
+
+
+def test_a_record_that_changes_nothing_and_says_nothing_marks_the_line_read(make_bot):
+    # MUT: `return True` at the end of apply_block → the unchanged record counts as shown
+    from test_bot import record
+
+    bot = make_bot(profile=ALL)
+    before = bot.repo.log_path.read_bytes()
+    plugin(bot).REPLIES[:] = [record("", {"date": "2027-03-03", "flow": "light"})]
+    msg = group_text(bot, "el miércoles poco", user=HER)
+    assert bot.repo.log_path.read_bytes() == before  # the day already said so
+    assert sent(bot) == []
+    assert reactions(bot) == [(msg["message_id"], "👀")]
+
+
+def test_a_record_that_changes_something_shows_anotado_and_no_read_mark(make_bot):
+    from test_bot import record
+
+    bot = make_bot(profile=ALL)
+    plugin(bot).REPLIES[:] = [record("", {"date": "2027-03-04", "flow": "heavy"})]
+    group_text(bot, "hoy mucho", user=HER)
+    assert bot.tg.texts()[0].startswith("Anotado:")
+    assert reactions(bot) == []
+
+
+def test_a_text_answer_adds_no_reactions(make_bot):
+    # MUT: call `self.mark_read(...)` whatever was shown → 👀 under a worded answer
+    bot = make_bot(profile=ALL)
+    a, b = message("quedan 10 raciones"), message("y 2 yogures", user=HER)
+    burst(bot, a, b, reply="Anotado todo.")
+    assert bot.tg.texts() == ["Anotado todo."]
+    assert reactions(bot) == []
+
+
+def test_a_refused_read_mark_falls_back_to_a_thumb_once_and_never_to_text(make_bot):
+    # MUT: drop NOTED from `react`'s tries → the refused message gets no reaction at all
+    bot = make_bot(profile=ALL)
+    a, b = message("¿vienes a cenar?"), message("sí", user=HER)
+    bot.tg.fail_next("setMessageReaction", 400, "Bad Request: REACTION_INVALID")
+    bot.tg.fail_next("setMessageReaction", 400, "Bad Request: REACTION_INVALID")
+    bot.tg.fail_next("setMessageReaction", 400, "Bad Request: REACTION_INVALID")
+    burst(bot, a, b, reply="NO_REPLY")
+    # a: 👀 refused, 👍 refused, then left alone; b: 👀 refused, 👍 taken
+    assert reactions(bot) == [
+        (a["message_id"], "👀"),
+        (a["message_id"], "👍"),
+        (b["message_id"], "👀"),
+        (b["message_id"], "👍"),
+    ]
+    assert sent(bot) == []  # never a text instead of 👀
+
+
+def test_a_mention_never_gets_only_a_read_mark(make_bot):
+    # MUT: drop the `asking` branch in mark_read → the reply to the bot gets only 👀
+    bot = make_bot(profile=ALL)
+    chat, asked = message("¿vienes a cenar?"), addressed("¿me ha bajado?")
+    burst(bot, chat, asked, reply="NO_REPLY")
+    [said] = sent(bot)
+    assert said["text"] == bot.t("send_failed")
+    assert said["reply_parameters"]["message_id"] == asked["message_id"]
+    assert reactions(bot) == [(chat["message_id"], "👀")]  # the line without a mention is read
+    assert bot.kv.get_json(f"pending:{GROUP}") is None
+
+
+def test_a_mention_answered_with_words_gets_no_read_mark(make_bot):
+    bot = make_bot(profile=ALL)
+    burst(bot, message("¿vienes a cenar?"), addressed("¿me ha bajado?"), reply="Aún no.")
+    assert bot.tg.texts() == ["Aún no."] and reactions(bot) == []
+
+
+def test_a_failed_turn_marks_nothing_and_its_lines_go_with_the_next(make_bot):
+    # MUT: delete `pending:<chat>` before tell_down on an exception → the next turn lacks them
+    bot = make_bot(profile=ALL)
+    mod = plugin(bot)
+    mod.REPLIES[:] = [
+        RuntimeError("down"),
+        {"text": "x", "conversation": None, "kept": False},
+        "NO_REPLY",
+    ]
+    a = group_text(bot, "¿vienes a cenar?")
+    b = group_text(bot, "sí", user=HER)
+    assert reactions(bot) == [] and sent(bot) == []  # nothing was read, nothing said
+    c = group_text(bot, "vale")
+    assert contents(mod.CALLS[2]) == [
+        "[no mention] Marta: ¿vienes a cenar?",
+        "[no mention] Lucía: sí",
+        "[no mention] Marta: vale",
+    ]
+    assert reactions(bot) == [(m["message_id"], "👀") for m in (a, b, c)]
+    assert bot.kv.get_json(f"pending:{GROUP}") is None
+
+
+def test_a_busy_turn_marks_nothing(make_bot):
+    from test_turns import busy
+
+    bot = make_bot(profile=ALL)
+    plugin(bot).REPLIES[:] = [busy(600)]
+    group_text(bot, "¿vienes a cenar?")
+    assert reactions(bot) == [] and sent(bot) == []
+
+
+def test_asked_mode_never_marks_read_and_reacts_on_the_last_only(make_bot):
+    # MUT: drop `self.answer_all and` from `people` in _converse → asked mode gets 👀 too
+    bot = make_bot()
+    plugin(bot).REPLIES[:] = ["NO_REPLY"]
+    say(bot, "hoy poco", reply_to=QUESTION)
+    assert sent(bot) == [] and reactions(bot) == []  # as in 0.8.0: nothing at all
+    a, b = addressed("hoy poco"), addressed("y dolor 3")
+    burst(bot, a, b, reply=REACT)
+    assert reactions(bot) == [(b["message_id"], "👍")]
+
+
+def test_a_private_chat_in_all_mode_gets_no_read_mark(make_bot):
+    # MUT: drop `chat == self.chat_id` from `people` in _converse → «send_failed» in private
+    bot = make_bot(profile=ALL)
+    plugin(bot).REPLIES[:] = ["NO_REPLY"]
+    say(bot, "hola", user=ADMIN, chat=ADMIN, private=True)
+    assert len(plugin(bot).CALLS) == 1
+    assert reactions(bot) == [] and sent(bot) == []  # as in 0.8.0
+
+
+def test_the_all_rules_say_no_reply_marks_the_messages_read():
+    text = " ".join(assistant.rules("Lucía", "es", ["Marta"], answer_all=True).split())
+    assert "write only NO_REPLY: the bot then marks those messages with 👀 (read)" in text
+    assert "never need words just to say you saw something" in text
+    assert "a 👍 says you noted it" in text
+    assert "sends nothing" not in text and "gets nothing" not in text
+    asked = assistant.rules("Lucía", "es", ["Marta"])
+    assert "👀" not in asked.split("You are the cycle companion", 1)[1].split("telegram")[0]
