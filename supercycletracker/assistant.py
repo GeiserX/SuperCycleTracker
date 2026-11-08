@@ -62,8 +62,8 @@ _WHEN = re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}")
 # What the assistant writes, alone, when an answer needs no words (`answer_scope: all`, talk between
 # people with nothing for it). A provider that fails a turn with no text (AIDriver ends one as
 # `no_output`) still gets text; the app drops the word wherever it stands, so it never reaches the
-# chat. An answer left empty still counts as answered, and in the group the bot then puts 👀
-# («read») on every message of the turn, so nobody's message is left with nothing.
+# chat. An answer left empty still counts as answered, and every message of the turn keeps the 👀
+# the bot put on it when the turn started («read»), so nobody's message is left with nothing.
 NO_REPLY = "NO_REPLY"
 _NO_REPLY = re.compile(
     r"(?<![A-Za-z0-9])([`*_~]*)NO\\?_REPLY\1(?![A-Za-z0-9])"
