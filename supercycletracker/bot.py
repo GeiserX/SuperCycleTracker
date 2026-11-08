@@ -2199,8 +2199,11 @@ class Bot:
         mids = [m for m in _people(lines) if (chat, m) not in self._eyed]
         for m in mids:
             self._eyed[(chat, m)] = None
-        while len(self._eyed) > EYED_MAX:
-            self._eyed.popitem(last=False)
+        while len(self._eyed) > EYED_MAX:  # forget the oldest done, never one on its way
+            old = next((k for k, v in self._eyed.items() if v is not None), None)
+            if old is None:
+                break
+            del self._eyed[old]
         if not mids:
             return None
         done = threading.Event()

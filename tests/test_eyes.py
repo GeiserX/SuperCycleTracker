@@ -182,3 +182,28 @@ def test_a_reaction_only_answer_replaces_the_eyes_and_a_later_turn_shows_them_ag
     bot.join_idle()
     assert bot.tg.texts() == ["Vale."]
     assert reactions(bot)[2:] == [(msg["message_id"], "👀")]
+
+
+def test_forgetting_old_eyes_never_drops_one_still_on_its_way(make_bot, monkeypatch):
+    # MUT: `self._eyed.popitem(last=False)` in `_look` → the queued 👀 is forgotten and skipped
+    from supercycletracker import bot as module
+
+    monkeypatch.setattr(module, "EYED_MAX", 1)
+    bot = make_bot(profile=ALL)
+    release = threading.Event()
+    call = bot.tg.call
+
+    def slow(method, **params):
+        if method == "setMessageReaction":
+            release.wait(10)
+        return call(method, **params)
+
+    bot.tg.call = slow
+    a, b = message("quedan 10 raciones"), message("y pan", user=HER)
+    bot.debounce_s = 0.3
+    bot.handle({"message": a})
+    bot.handle({"message": b})  # one turn, two claims on their way, room for one
+    time.sleep(0.5)
+    release.set()
+    bot.join_idle()
+    assert reactions(bot)[:2] == [(a["message_id"], "👀"), (b["message_id"], "👀")]
