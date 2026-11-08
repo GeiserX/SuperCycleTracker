@@ -34,7 +34,7 @@ import secrets
 import threading
 import time
 import unicodedata
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -128,8 +128,10 @@ CONTEXT_MAX = 50  # unaddressed group lines a turn takes as context, the newest
 LOG_KEEP_DAYS = 7  # the chat log keeps at least this much, for the context lines of a turn
 NOT_TO_YOU = "[not to you] "  # the mark of a group line that did not call the bot
 NO_MENTION = "[no mention] "  # the same mark with `answer_scope: all`, where such a line is for it
-READ = "👀"  # `answer_scope: all`: put on every message a turn read when it showed nothing
-NOTED = "👍"  # tried once on a message whose chat refuses another reaction
+READ = "👀"  # put on every person's message a turn covers as it starts: «on it», then «read»
+NOTED = "👍"  # tried once at the end of a silent turn on a message that refused 👀
+EYES_WAIT_S = 10.0  # the end of a turn waits this long at most for its 👀 to reach Telegram
+EYED_MAX = 1000  # the messages the bot remembers having put 👀 on, the newest
 OFFER_GONE = "remind_timeout"  # the label an offer's buttons give way to when nobody answered
 REMIND_TTL_S = 1800  # an offered reminder can be tapped this long; then nothing is done
 REMIND_DAYS = 60  # the furthest ahead a reminder may be
@@ -458,6 +460,7 @@ class Turn:
     mid: int | None  # the message an ask replies to: the newest the turn started with
     pulled: list = field(default_factory=list)
     asks: list[str] = field(default_factory=list)
+    looks: list = field(default_factory=list)  # one Event per batch of 👀, set once it is done
     edited: dict = field(default_factory=dict)  # message id -> its newest wording
     closed: bool = False
     # taps on a calendar button: each approves the additions it named, once
@@ -657,6 +660,9 @@ class Bot:
         self.asks: dict[str, dict] = {}  # the plugin's open asks, by the key on their buttons
         self.hearer = Worker(self._hear_chat, name="sct-hear")
         self.side = Worker(lambda job: job(), name="sct-asks")  # answers to asks, off the poll loop
+        self.eyes = Worker(lambda job: job(), name="sct-eyes")  # a turn's 👀, so it never waits
+        # (chat, message) -> the 👀 the bot put on it: True shown, False refused, None on its way
+        self._eyed: OrderedDict[tuple[int, int], bool | None] = OrderedDict()
 
     def start(self) -> None:
         """`getMe`, then `getChatMember` for the bot in the group: Telegram delivers every group
@@ -724,13 +730,14 @@ class Bot:
         self.worker.stop()
         self.later.stop()
         self.side.stop()
+        self.eyes.stop()
         self.kv.close()
 
     def join_idle(self, timeout: float = 10.0) -> None:
         """Wait until no note is being heard, no turn runs and no answer to an ask is on its way
         (tests drain the bot with this)."""
         deadline = time.monotonic() + timeout
-        workers = (self.hearer, self.worker, self.side)
+        workers = (self.hearer, self.worker, self.side, self.eyes)
         while not all(w.idle() for w in workers):
             for w in workers:
                 w.join_idle(max(0.01, deadline - time.monotonic()))
@@ -2004,6 +2011,7 @@ class Bot:
     def _converse(self, chat: int, key: str, lines: list[dict], state: Turn) -> None:
         p = self.profile
         block_cfg = p.assistant or {}
+        self.look(chat, lines, state)  # 👀 at once, before anything that takes time
         try:
             self.tg.call("sendChatAction", chat_id=chat, action="typing")
         except TelegramError as e:
@@ -2087,6 +2095,7 @@ class Bot:
             self.tell_down(chat, lines)
             return
         log.info("ai turn ok %ds", round(time.monotonic() - started))
+        self.looked(state)  # a 👀 still on its way must not land over the answer's own reaction
         self.last_ai = self.now()
         with self._conv_lock:
             if self._resets[chat] != resets:
@@ -2164,15 +2173,75 @@ class Bot:
             self.post(chat, html.escape(self.t("read_no_answer")), reply_parameters=note)
             log.info("ai turn showed nothing for an addressed message: read_no_answer")
         read = [m for m in people if m not in asking]
+        with self._q:  # the 👀 put when the turn started stays; where it was refused, 👍 once
+            fresh = [m for m in read if (chat, m) not in self._eyed]
+            refused = [m for m in read if self._eyed.get((chat, m)) is False]
+        if fresh:
+            self.react(chat, fresh, READ)
+        if refused:
+            self.react(chat, refused, NOTED)
         if read:
-            self.react(chat, read, READ)
             log.info("ai turn showed nothing: read mark on %d", len(read))
 
-    def react(self, chat: int, mids: Sequence[int], emoji: str) -> int:
+    def look(self, chat: int, lines: Sequence[Mapping], state: Turn) -> None:
+        """👀 on every person's message of `lines` that has none from the bot yet, as a turn
+        starts, so the chat sees at once that the bot is on it: a text, voice note, photo or
+        file, an edit on the message edited; never a tap (its message is the bot's)."""
+        with self._q:
+            job = self._look(chat, lines, state)
+        if job is not None:
+            self.eyes.submit(job)
+
+    def _look(self, chat: int, lines: Sequence[Mapping], state: Turn) -> Callable | None:
+        """With `_q` held: claim the messages of `lines` that need 👀 and return the job that
+        puts it, for the `eyes` thread, so the turn never waits on Telegram (None: nothing to
+        do). A refusal is logged and nothing else: no 👍 (that says «noted»), no text."""
+        mids = [m for m in _people(lines) if (chat, m) not in self._eyed]
+        for m in mids:
+            self._eyed[(chat, m)] = None
+        while len(self._eyed) > EYED_MAX:
+            self._eyed.popitem(last=False)
+        if not mids:
+            return None
+        done = threading.Event()
+        state.looks.append(done)  # under `_q`, so the end of the turn always waits for it
+
+        def job() -> None:
+            try:
+                for m in mids:
+                    with self._q:
+                        if (chat, m) not in self._eyed:
+                            continue  # the answer's own reaction is already on it
+                    ok = False
+                    try:
+                        self.tg.call(
+                            "setMessageReaction",
+                            chat_id=chat,
+                            message_id=m,
+                            reaction=[{"type": "emoji", "emoji": READ}],
+                        )
+                        ok = True
+                    except Exception as e:  # noqa: BLE001 - a refusal never touches the turn
+                        log.info("start read mark failed: %s", safe(e))
+                    with self._q:
+                        if (chat, m) in self._eyed:
+                            self._eyed[(chat, m)] = ok
+            finally:
+                done.set()
+
+        return job
+
+    def looked(self, state: Turn) -> None:
+        """Wait, EYES_WAIT_S at most, until the turn's 👀 reached Telegram or were refused."""
+        deadline = time.monotonic() + EYES_WAIT_S
+        for done in list(state.looks):
+            done.wait(max(0.0, deadline - time.monotonic()))
+
+    def react(self, chat: int, mids: Sequence[int], emoji: str) -> list[int]:
         """Put `emoji` on each message of `mids`. Where Telegram refuses it (the chat's allowed
         reactions, a deleted message) 👍 is tried once instead, then the refusal is logged and
-        the next message goes on. How many messages got a reaction."""
-        done = 0
+        the next message goes on. The messages that got a reaction."""
+        done = []
         for mid in mids:
             for one in dict.fromkeys((emoji, NOTED)):
                 try:
@@ -2182,11 +2251,18 @@ class Bot:
                         message_id=mid,
                         reaction=[{"type": "emoji", "emoji": one}],
                     )
-                    done += 1
+                    done.append(mid)
                     break
                 except TelegramError as e:
                     log.info("reaction failed: %s", safe(e))
         return done
+
+    def unlook(self, chat: int, mids: Sequence[int]) -> None:
+        """The answer's reaction replaced the bot's 👀 on `mids` (Telegram keeps one reaction
+        per bot): forget it, so a later turn on the same message shows 👀 again."""
+        with self._q:
+            for m in mids:
+                self._eyed.pop((chat, m), None)
 
     def tell_down(self, chat: int, lines: Sequence[Mapping]) -> None:
         """A failed turn: «ai_down» with the keyboard. Not when every line is household talk
@@ -2300,6 +2376,9 @@ class Bot:
                 for uid in _users(got):
                     if uid not in state.users:
                         state.users.append(uid)
+                look = self._look(state.chat, got, state)  # a line that joins shows 👀 at once
+            if look is not None:
+                self.eyes.submit(look)
             return [
                 {
                     "id": x["id"],
@@ -3426,7 +3505,9 @@ class Bot:
             except TelegramError as e:
                 log.warning("%s failed: %s", method, safe(e))
         if acts["react"] and everyone:
-            if self.react(chat, everyone, acts["react"]):
+            got = self.react(chat, everyone, acts["react"])
+            if got:
+                self.unlook(chat, got)
                 return True
         elif acts["react"] and to is not None:
             try:
@@ -3436,6 +3517,7 @@ class Bot:
                     message_id=to,
                     reaction=[{"type": "emoji", "emoji": acts["react"]}],
                 )
+                self.unlook(chat, [to])
                 return True
             except TelegramError as e:
                 log.info("reaction failed: %s", safe(e))

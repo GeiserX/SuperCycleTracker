@@ -96,11 +96,13 @@ def test_a_reaction_alone_says_nothing_and_a_failed_one_says_the_emoji(make_bot)
     plugin(bot).REPLIES[:] = ["```telegram\nreact: ❤️\n```"]
     before = len(sent(bot))
     msg = say(bot, "gracias", reply_to=QUESTION)
-    [r] = bot.tg.of("setMessageReaction")
+    eyes, r = bot.tg.of("setMessageReaction")  # 👀 when the turn started, then the answer's
+    assert (eyes["message_id"], eyes["reaction"][0]["emoji"]) == (msg["message_id"], "👀")
     assert (r["chat_id"], r["message_id"]) == (GROUP, msg["message_id"])
     assert r["reaction"] == [{"type": "emoji", "emoji": "❤"}]
     assert len(sent(bot)) == before
-    bot.tg.fail_next("setMessageReaction", 400, "Bad Request: REACTION_INVALID")
+    bot.tg.fail_next("setMessageReaction", 400, "Bad Request: REACTION_INVALID")  # the 👀
+    bot.tg.fail_next("setMessageReaction", 400, "Bad Request: REACTION_INVALID")  # the 🙏
     plugin(bot).REPLIES[:] = ["```telegram\nreact: 🙏\n```"]
     say(bot, "gracias otra vez", reply_to=QUESTION)
     assert sent(bot)[-1]["text"] == "🙏"
