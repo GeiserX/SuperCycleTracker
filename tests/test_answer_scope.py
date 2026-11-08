@@ -258,7 +258,7 @@ def test_the_all_rules_say_how_to_answer_a_line_without_a_mention():
     assert "every message Lucía or Marta writes reaches you, mention or not" in text
     assert "answer with only a reaction (react: 👍" in text
     assert "write only NO_REPLY" in text
-    assert "A mention or a reply to you always gets an answer in words." in text
+    assert "A mention, a reply to you or a voice note always gets an answer in words, never" in text
     assert '"[not to you]" is context only' in text
     assert "and are context only" not in text  # the asked-mode lines are gone
     assert assistant.drop_no_reply("NO_REPLY") == ""
@@ -487,7 +487,8 @@ def test_a_mention_never_gets_only_a_read_mark(make_bot):
     chat, asked = message("¿vienes a cenar?"), addressed("¿me ha bajado?")
     burst(bot, chat, asked, reply="NO_REPLY")
     [said] = sent(bot)
-    assert said["text"] == bot.t("send_failed")
+    # MUT: post «send_failed» in mark_read → a false error for a silence the assistant chose
+    assert said["text"] == bot.t("read_no_answer") != bot.t("send_failed")
     assert said["reply_parameters"]["message_id"] == asked["message_id"]
     assert reactions(bot) == [(chat["message_id"], "👀")]  # the line without a mention is read
     assert bot.kv.get_json(f"pending:{GROUP}") is None
@@ -542,7 +543,7 @@ def test_asked_mode_never_marks_read_and_reacts_on_the_last_only(make_bot):
 
 
 def test_a_private_chat_in_all_mode_gets_no_read_mark(make_bot):
-    # MUT: drop `chat == self.chat_id` from `people` in _converse → «send_failed» in private
+    # MUT: drop `chat == self.chat_id` from `people` in _converse → «read_no_answer» in private
     bot = make_bot(profile=ALL)
     plugin(bot).REPLIES[:] = ["NO_REPLY"]
     say(bot, "hola", user=ADMIN, chat=ADMIN, private=True)
@@ -558,3 +559,99 @@ def test_the_all_rules_say_no_reply_marks_the_messages_read():
     assert "sends nothing" not in text and "gets nothing" not in text
     asked = assistant.rules("Lucía", "es", ["Marta"])
     assert "👀" not in asked.split("You are the cycle companion", 1)[1].split("telegram")[0]
+
+
+def media(kind, user=HER, caption=None, entities=None, reply_to_bot=False):
+    """A sticker, GIF or photo in the group; `entities` go on its caption."""
+    extra = (
+        {"photo": [{"file_id": "m1", "file_size": 3}]}
+        if kind == "photo"
+        else {kind: {"file_id": "m1", "is_animated": False, "is_video": False}}
+    )
+    msg = {
+        "message_id": next(_mids),
+        "from": {"id": user},
+        "chat": {"id": GROUP, "type": "supergroup"},
+        **extra,
+    }
+    if caption is not None:
+        msg["caption"] = caption
+    if entities is not None:
+        msg["caption_entities"] = entities
+    if reply_to_bot:
+        msg["reply_to_message"] = {"message_id": 1, "from": {"id": BOT_ID}, "text": QUESTION}
+    return msg
+
+
+@pytest.mark.parametrize("kind", ["sticker", "animation", "photo"])
+def test_a_sticker_gif_or_photo_left_without_words_is_marked_read_not_an_error(make_bot, kind):
+    # MUT: `asks=True` for every file in on_file → «read_no_answer» under a sticker
+    bot = make_bot(profile=ALL)
+    bot.tg.files["m1"] = b"fictional media"
+    plugin(bot).REPLIES[:] = [{"text": "", "conversation": "c", "kept": True}]
+    msg = media(kind)
+    bot.handle({"message": msg})
+    bot.join_idle()
+    assert len(plugin(bot).CALLS) == 1
+    assert sent(bot) == []
+    assert reactions(bot) == [(msg["message_id"], "👀")]
+
+
+@pytest.mark.parametrize("how", ["mention", "reply"])
+def test_a_photo_that_calls_the_bot_still_gets_words(make_bot, how):
+    # MUT: `asks=False` for every file in on_file → the photo that asked gets only 👀
+    bot = make_bot(profile=ALL)
+    bot.tg.files["m1"] = b"fictional media"
+    plugin(bot).REPLIES[:] = ["NO_REPLY"]
+    if how == "mention":
+        mention = [{"type": "mention", "offset": 0, "length": 18}]
+        msg = media("photo", caption="@example_cycle_bot mira", entities=mention)
+    else:
+        msg = media("photo", caption="mira", reply_to_bot=True)
+    bot.handle({"message": msg})
+    bot.join_idle()
+    [said] = sent(bot)
+    assert said["text"] == bot.t("read_no_answer")
+    assert said["reply_parameters"]["message_id"] == msg["message_id"]
+    assert reactions(bot) == []
+
+
+def test_a_voice_note_left_without_words_gets_words(make_bot):
+    # MUT: `"asks": False` on the voice line → the voice note gets only 👀
+    from test_bot import voice
+
+    bot = make_bot(profile=ALL)
+    bot.tg.files["v1"] = b"OggS fictional"
+    plugin(bot).VOICES[:] = ["me ha bajado hoy"]
+    plugin(bot).REPLIES[:] = ["NO_REPLY"]
+    msg = voice(bot, mime_type="audio/ogg")
+    echo, said = sent(bot)
+    assert echo["text"] == "🎤 me ha bajado hoy"
+    assert said["text"] == bot.t("read_no_answer")
+    assert said["reply_parameters"]["message_id"] == msg["message_id"]
+    assert reactions(bot) == []
+
+
+def test_a_line_queued_by_0_8_without_asks_still_counts_by_its_mark():
+    from supercycletracker.bot import _asking
+
+    lines = [
+        {"id": 1, "content": "[no mention] Marta: hola"},
+        {"id": 2, "content": "Lucía [replying to the bot: ¿Te ha bajado?] sí"},
+        {"id": 3, "content": "Lucía: [file: inbox/3-sticker.webp]", "asks": False},
+    ]
+    assert _asking(lines) == [2]
+
+
+def test_an_unchanged_record_with_a_gesture_that_fails_still_marks_the_line_read(make_bot):
+    # MUT: `shown = texted` at the start of act → the failed sticker counts as shown
+    from test_bot import record
+
+    bot = make_bot(profile=ALL)
+    before = bot.repo.log_path.read_bytes()
+    answer = record("```telegram\nsticker: 🥰\n```", {"date": "2027-03-03", "flow": "light"})
+    plugin(bot).REPLIES[:] = [answer]
+    msg = group_text(bot, "el miércoles poco", user=HER)
+    assert bot.repo.log_path.read_bytes() == before  # the day already said so
+    assert bot.tg.of("sendSticker") == [] and sent(bot) == []
+    assert reactions(bot) == [(msg["message_id"], "👀")]

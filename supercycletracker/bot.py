@@ -492,14 +492,15 @@ def _people(lines: Sequence[Mapping]) -> list[int]:
 
 
 def _asking(lines: Sequence[Mapping]) -> list[int]:
-    """The messages among `lines` that called the bot (a mention, a reply to it, a voice note, a
-    photo or file, her text when the bot reads the group): they always get words."""
+    """The messages among `lines` that called the bot (a mention, a reply to it, a command, a
+    voice note): they always get words. A photo, sticker or file without a mention does not.
+    A line queued by 0.8 has no `asks`: then any line not marked «[no mention]» did."""
     return [
         x["id"]
         for x in lines
         if isinstance(x.get("id"), int)
         and not x.get("tap")
-        and not str(x.get("content", "")).startswith(NO_MENTION)
+        and x.get("asks", not str(x.get("content", "")).startswith(NO_MENTION))
     ]
 
 
@@ -1346,7 +1347,9 @@ class Bot:
         if content is None and not private:
             content = self.unmentioned(msg, text, role)
         if content is not None:
-            self.queue_text(chat["id"], msg, content, role, self._strip_mention(msg, text)[0])
+            body = self._strip_mention(msg, text)[0]
+            asks = not content.startswith(NO_MENTION)
+            self.queue_text(chat["id"], msg, content, role, body, asks=asks)
         elif not private:
             self.log_seen(chat["id"], msg, text)
 
@@ -1494,6 +1497,7 @@ class Bot:
             "replied": self.replied(msg),
             "admin": role == ADMIN,
             "uid": user,
+            "asks": True,
         }
         self.queue_line(chat["id"], line)
         log.info("voice queued")
@@ -1538,11 +1542,15 @@ class Bot:
             self.post(chat["id"], self.t("file_too_big"), reply_parameters=note)
             log.info("file refused: too_big")
             return
-        body = self._strip_mention(msg, str(msg.get("caption") or ""), "caption_entities")[0]
+        body, mentioned = self._strip_mention(
+            msg, str(msg.get("caption") or ""), "caption_entities"
+        )
         body = body.strip()
+        reply = msg.get("reply_to_message") or {}
+        to_bot = self.bot_id is not None and (reply.get("from") or {}).get("id") == self.bot_id
         content = f"{self.who(role, user)}{self.replied(msg)}: [{label}: {name}] {body}".rstrip()
         file = {"file_id": media["file_id"], "name": name, "mime": mime, "size": size}
-        self.queue_text(chat["id"], msg, content, role, body, file=file)
+        self.queue_text(chat["id"], msg, content, role, body, file=file, asks=mentioned or to_bot)
 
     def queue_text(
         self,
@@ -1553,11 +1561,13 @@ class Bot:
         body: str | None = None,
         row: int | None = None,
         file: dict | None = None,
+        asks: bool = True,
     ) -> None:
         """Append a line to `pending:<chat>`, log it in the chat log (or reuse its `row`) and
         queue the chat for the worker. `body` is the message's own words, kept so an edit can be
         compared with them; `file` is the photo or file the line names, fetched when its turn
-        starts. Without an assistant: «no_ai» with today's keyboard."""
+        starts; `asks`: the message called the bot (a mention, a reply to it, a command), so it
+        always gets words. Without an assistant: «no_ai» with today's keyboard."""
         if not self.has_assistant:
             self.post(chat, self.t("no_ai"), self.today_keyboard())
             log.info("text without assistant")
@@ -1581,6 +1591,7 @@ class Bot:
             "admin": role == ADMIN,
             "uid": user,
             "row": row,
+            "asks": asks,
         }
         if body is not None:
             line["body"] = body.strip()
@@ -2144,13 +2155,14 @@ class Bot:
     def mark_read(self, chat: int, covered: Sequence[Mapping], people: Sequence[int]) -> None:
         """`answer_scope: all`: a turn that showed nothing (`NO_REPLY`, an empty answer, a record
         that changed nothing, buttons with no text to carry them) puts 👀 on every person's
-        message it covered, «read», never a text. A message that called the bot gets words: the
-        answer failed it, so «send_failed» as a reply to the newest such message, and no 👀."""
+        message it covered, «read», never a text. A message that called the bot gets words:
+        «read_no_answer» as a reply to the newest such message, and no 👀. Not «send_failed»:
+        nothing failed, the assistant chose no words."""
         asking = _asking(covered)
         if asking:
             note = {"message_id": asking[-1], "allow_sending_without_reply": True}
-            self.post(chat, html.escape(self.t("send_failed")), reply_parameters=note)
-            log.info("ai turn showed nothing for an addressed message: send_failed")
+            self.post(chat, html.escape(self.t("read_no_answer")), reply_parameters=note)
+            log.info("ai turn showed nothing for an addressed message: read_no_answer")
         read = [m for m in people if m not in asking]
         if read:
             self.react(chat, read, READ)
@@ -3188,7 +3200,8 @@ class Bot:
             if logged is not None:  # logged before (seen, or answered long ago): one row
                 self.kv.chat_edit(logged["id"], content, body, asked=True)
                 row = logged["id"]
-            self.queue_text(chat_id, msg, content, role, body, row)
+            asks = not content.startswith(NO_MENTION)
+            self.queue_text(chat_id, msg, content, role, body, row, asks=asks)
             log.info("edit: new message")
         elif logged is not None and not logged["asked"]:
             self.relog(logged, body, name)
@@ -3378,10 +3391,11 @@ class Bot:
         react to, a refusal, no sticker set), the emoji is said instead, or that it could not be
         sent, so the chat always hears back. `everyone` (`answer_scope: all`, an answer with no
         text): the reaction goes on each of those messages, 👍 where one refuses it. True when
-        something reached the chat."""
+        something of the gestures, or the fallback, reached the chat: `texted` (the answer has
+        text or a block) only spares the fallback, it does not count as shown here."""
         if not any(acts.values()):
             return False
-        shown = texted
+        shown = False
         for doc in acts["documents"]:
             try:
                 self.tg.send_file(
@@ -3422,14 +3436,17 @@ class Bot:
                 return True
             except TelegramError as e:
                 log.info("reaction failed: %s", safe(e))
-        if not shown:
+        if shown:
+            return True
+        if not texted:
             note = (
                 {"message_id": reply_to, "allow_sending_without_reply": True} if reply_to else None
             )
             said = acts["react"] or acts["sticker"]
             text = html.escape(said) if said else html.escape(self.t("send_failed"))
             self.post(chat, text, reply_parameters=note)
-        return True
+            return True
+        return False
 
     def sticker(self, emoji: str | None) -> str | None:
         """The file_id of the profile's sticker set for `emoji`, read once per set, or None."""

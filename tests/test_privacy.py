@@ -190,9 +190,9 @@ def test_the_service_log_holds_no_words_dates_values_or_names(
     if planted:  # the positive control: one careless line must turn the test red
         original = Bot.queue_text
 
-        def leaky(self, chat, msg, content, role, *rest):
+        def leaky(self, chat, msg, content, role, *rest, **kw):
             bot_module.log.info("queued %s", content)
-            return original(self, chat, msg, content, role, *rest)
+            return original(self, chat, msg, content, role, *rest, **kw)
 
         monkeypatch.setattr(Bot, "queue_text", leaky)
     caplog.set_level(logging.DEBUG)
