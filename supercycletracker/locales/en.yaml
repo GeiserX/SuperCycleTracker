@@ -36,6 +36,7 @@ invalid_block: "I could not note that properly, so I saved nothing. Can you tell
 ai_down: "Right now I cannot read written messages. You can note it with the buttons, and if you write it again later I will read it."
 file_name: "file"  # a file the assistant sends whose name has no letter left
 send_failed: "I could not send you what I had. Can you ask me again?"
+read_no_answer: "Read. I have nothing to add."  # a mention or reply the assistant left with no words
 ai_busy: "I can't answer right now: I have no capacity left for {wait}. I'll answer everything then, with no need to repeat anything. Meanwhile you can note it with the buttons."
 busy_minutes: "about {n} minutes"
 busy_hours: "about {n} hours"
