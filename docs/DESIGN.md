@@ -429,7 +429,7 @@ The rules tell the assistant what such a line wants: take in what it says and ac
 (a day it describes gets its record block), then answer with only a reaction (👍, "seen and noted")
 unless it asks something or changes what someone has to do, in which case answer in words and say
 it took note. Talk between people with nothing for the assistant gets no words: the assistant writes
-only `NO_REPLY`, and the messages keep the 👀 the bot put on them when the turn started (5.2), now
+only `NO_REPLY`, and the messages keep the 👀 the bot put on them when they arrived (5.2), now
 meaning «read». A mention or a reply to the bot always gets words. The reaction is the assistant's
 own, after reading, through the `telegram` block (gestures.py), and it replaces that 👀 (Telegram
 keeps one reaction per bot on a message). In the group, an answer with no text puts its
@@ -453,13 +453,13 @@ retried, and still counts as answered: the conversation is kept and the lines le
 `pending:<chat>`, so they are not sent again.
 
 With `answer_scope: all`, a person's message in the group is never left with nothing visible. Every
-person's message a turn covers already shows 👀 from the moment the turn started (5.2). When a kept
+person's message a turn covers already shows 👀 from the moment the bot received it (5.2). When a kept
 turn shows nothing else in the chat (no text, no reaction, sticker, photo or file, no «Anotado:», no
 settings or reminder message), that 👀 stays and now means «read». That covers `NO_REPLY`, an empty
 answer (the private plugin's own silence word arrives as `""`), an empty `telegram` block, choices
 with no text to carry them, and a record block that changed nothing (a gesture that failed beside it
 does not count as shown). The end of such a turn puts nothing on a message whose 👀 is there. Where
-Telegram refused the 👀 at the start (the chat's allowed reactions, a deleted message), it tries 👍
+Telegram refused the 👀 on arrival (the chat's allowed reactions, a deleted message), it tries 👍
 once on that message, then logs the refusal and goes on; it never posts a text instead. A message
 the bot has no record of marking (one it forgot, past `EYED_MAX`) gets 👀 then, with the same 👍
 fallback. A message that called the bot (a mention, a reply to it, a command, a voice note, or a
@@ -470,9 +470,9 @@ rules tell it a mention, a reply or a voice note always gets words. A pending li
 it called the bot (`asks`); a sticker, GIF or photo without a mention does not, so silence on it
 keeps its 👀 and gets no text. An edit that adds a mention to an answered line counts as calling the
 bot, on the message it edits; a plain edit does not.
-A failed turn (an exception, a timeout, `kept: false`, a busy plugin) leaves the 👀 of its start:
-its lines stay in `pending:<chat>` and go with the next turn, which adds no second 👀. Private
-chats and `asked` get the 👀 of the start like the group, and an empty answer there shows nothing
+A failed turn (an exception, a timeout, `kept: false`, a busy plugin) leaves the 👀 its lines got on arrival:
+they stay in `pending:<chat>` and go with the next turn, which adds no second 👀. Private
+chats and `asked` get the 👀 on arrival like the group, and an empty answer there shows nothing
 more. The word
 exists because a provider may fail a turn whose session wrote no text (AIDriver ends one as
 `no_output`, and counts a message handed in mid-turn as answered only when text follows it); a
@@ -560,17 +560,24 @@ first tick after the wait (at least 60 s) runs the chat's turn again by itself; 
 meanwhile wait and go with it. A `typing`
 chat action is sent once at the start.
 
-**👀 at the start.** A turn can take minutes, so as soon as it starts the bot puts 👀 on every
-person's message it covers, in every chat: private chats, the group in `asked` and in `all` mode,
-mentions, replies, plain lines, stickers, photos and files, a voice note (on the note itself, never
-on the «🎤» echo) and an edit (on the message edited). A line handed over mid-turn gets it the
-moment the plugin takes it (`incoming`). Never on a tap (its message is the bot's own), so a turn
-of only taps shows none, and bots never start a turn. The reactions go on their own thread
-(`eyes`), so the turn never waits on Telegram, and the turn's end waits for them (`EYES_WAIT_S`, at
-most 10 s) so a late 👀 never lands over the answer's own reaction. A refusal is logged and nothing
+**👀 on arrival.** A turn can take minutes, and a message may wait for one to end, so the bot puts
+👀 on a person's message the moment it receives it, in the update handler (`queue_line`), whenever
+a turn will answer it: in every chat, private chats, the group in `all` mode (every person's line,
+sticker, photo or file) and in `asked` mode (a mention, a reply to the bot, a voice note, a photo or
+file, a `/hoy` with text), a voice note on the note itself (never on the «🎤» echo) and an edit that
+starts or joins a turn on the message edited. A photo sent while a turn runs, which waits for the
+next turn, and a line the plugin has not taken yet both show it at once. A plain `asked` line that
+only goes to the log as context gets none, since nothing answers it. When a turn starts, and when
+the plugin takes a line mid-turn (`incoming`), the bot puts 👀 on any covered message that has none
+yet (one queued before a restart): for the rest it is a no-op. Never on a tap (its message is the
+bot's own), so a turn of only taps shows none, and bots never start a turn. The reactions go on
+their own thread (`eyes`), so neither the handler nor the turn ever waits on Telegram, and the
+turn's end waits for every 👀 of its messages still on its way, the arrival ones too
+(`EYES_WAIT_S`, at most 10 s), so a late 👀 never lands over the answer's own reaction. A refusal is logged and nothing
 more: no 👍 then, since 👍 says «noted», and no text. The bot remembers in memory which messages
 carry its 👀 (the newest `EYED_MAX`, 1,000, never forgetting one still on its way), so a message never gets it twice: not from the next
-turn after a failed one, nor from an edit's turn. At the end a text answer leaves the 👀 there; a
+turn after a failed one, nor from the turn that takes a message already marked on arrival, nor
+from an edit's turn. At the end a text answer leaves the 👀 there; a
 reaction-only answer replaces it on the messages it reacts on (every covered one in the `all` group,
 the last one elsewhere), and a later turn on such a message shows 👀 again; silence keeps it (4.3).
 After a restart the memory is empty, and a message that goes again gets the same 👀 again, which
@@ -1302,7 +1309,7 @@ joins a group or its abilities change.
 | `test_gestures.py` | the renderer (folds, quotes, code with its language, hostile markup never opening a tag), the gestures block on hostile model output (dropped), the HTML send and its plain-text resend, a reaction alone sends no text and a failed one sends the emoji, files and a refused file never losing the text, a file name with no letter named in her language, stickers only from the profile's set, photos only from `photo_hosts`, the voice reaching the rules |
 | `test_offers.py` | the chat log: group talk goes to the next turn as `[not to you]` context once and is never answered, nothing is kept with `asked`, a failed turn keeps it, the recap leaves out the new lines and reaches back `history_days` only (0: none), edits rewrite the log and one that adds the mention keeps one row, `/nuevo` forgets it; an offer says no answer does nothing and expires into «Sin respuesta: nada»; the rules say who reaches the assistant; the calendar plan's dates (and none once late), its place in `context.md`, its offer once per key in waking hours with configurable titles, one tap approving exactly its entries, a moved plan offered again, «Nada» and strangers; reminders offered (past ones dropped, the calendar button only when set), posted once at their time, late after a restart, listed and cancelled, expiring, the calendar button approving that one addition and no other time, only for the person answered, and the block parsed strictly |
 | `test_answer_scope.py` | with `answer_scope: all` a group text without a mention from her or an admin starts a turn marked `[no mention]` (a reply to someone else's message named), a burst of them is one turn and a reaction-only answer sends no text and reacts on every covered message, a line handed over mid-turn too, one arriving mid-turn joins the running turn, a bot (itself, one listed as admin) and a stranger never start one and reach the next turn as `[not to you]` context, a stranger named like her stays `[not to you]` beside a household `[no mention]` line, her plain text with `read_all` is a `[no mention]` line, all mode renders principle 1 scoped, a failed or busy turn of only `[no mention]` lines posts nothing and keeps them pending while one with an addressed line still posts `ai_down`, `NO_REPLY` with punctuation, quotes, brackets, an escape or a code fence around it is silence while marks that do not wrap it stay, a bare mention is no `[no mention]` line, `NO_REPLY` sends nothing, posts no error, keeps the conversation and is not sent again, and is cut out of any answer it appears in, an edit of an answered line asks to check the answer and one answered with a reaction goes again as one row, `asked` keeps `[not to you]` and answers nothing, no assistant answers nothing, `bad_answer_scope`, and the all-mode rules; never silent: `NO_REPLY`, an empty answer, an empty gestures block, choices without text and a record that changed nothing put 👀 on every covered message (handed-over ones too), a text answer or an «Anotado:» adds none, a refused 👀 tries 👍 once and never posts text, a turn with a reply to the bot that shows nothing posts `read_no_answer` to it and 👀 only on the `[no mention]` lines, as do a voice note and a photo that mentions or replies to the bot, while a sticker, GIF or photo without a mention left silent gets 👀 and no text, and an unchanged record beside a failed gesture gets 👀, a failed or busy turn keeps its 👀 and its lines go with the next, `asked` and private chats keep the 👀 of the start and get no other, and the rules say `NO_REPLY` marks the messages read |
-| `test_eyes.py` | section 5.2 «👀 at the start»: 👀 reaches the message while the AI still works, in the `all` group (a plain line, a mention), `asked` (a reply to the bot) and private chats in both modes, and a text answer leaves it; a line handed over mid-turn gets it at once; a Telegram call held for seconds never holds the turn; a refused 👀 neither blocks the turn nor posts text nor tries 👍; a bot listed as admin starts no turn and gets none; a turn of only a tap puts none on the bot's message; a failed turn, the silent one after it and an edit's turn never add a second 👀; a reaction-only answer replaces it and an edit's later turn shows it again; forgetting old 👀 past `EYED_MAX` never drops one still on its way |
+| `test_eyes.py` | section 5.2 «👀 on arrival»: a photo sent during a running turn shows 👀 before that turn ends; a line arriving mid-turn shows it before the plugin takes it; a private line, an `asked` mention, reply, voice note and photo show it before the turn starts, once, never on the echo; an edit that now calls the bot shows it at once; an `asked` context line gets none; a held 👀 never holds the handler, and one still on its way lands before a reaction-only answer; 👀 reaches the message while the AI still works, in the `all` group (a plain line, a mention), `asked` (a reply to the bot) and private chats in both modes, and a text answer leaves it; a line handed over mid-turn gets it at once; a Telegram call held for seconds never holds the turn; a refused 👀 neither blocks the turn nor posts text nor tries 👍; a bot listed as admin starts no turn and gets none; a turn of only a tap puts none on the bot's message; a failed turn, the silent one after it and an edit's turn never add a second 👀; a reaction-only answer replaces it and an edit's later turn shows it again; forgetting old 👀 past `EYED_MAX` never drops one still on its way |
 | `test_i18n.py`, `test_privacy.py` | sections 7 and 11 |
 
 Each CI gate (ruff, pytest) is shown failing once on a mutated line before it is trusted.
