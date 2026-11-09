@@ -1,16 +1,21 @@
-"""👀 the moment a turn starts: every person's message the turn covers shows it at once, in every
-chat, so nobody waits on a long turn wondering whether the bot saw them. It goes on its own thread,
-never on bot messages or taps, never twice, and a refusal never touches the turn."""
+"""👀 the moment the bot receives a message a turn will answer, and again (a no-op) when the turn
+starts: every person's message shows it at once, in every chat, so nobody waits on a long turn
+wondering whether the bot saw them. It goes on its own thread, never on bot messages or taps, never
+twice, and a refusal never touches the handler or the turn."""
 
 import threading
 import time
 
 import pytest
-from conftest import ADMIN, HER
-from test_answer_scope import ALL, REACT, addressed, message, reactions, sent
+from conftest import ADMIN, GROUP, HER, PROFILE
+from test_answer_scope import ALL, REACT, addressed, contents, media, message, reactions, sent
 from test_bot import QUESTION, buttons, plugin, say, tap
 
 MENTION = [{"type": "mention", "offset": 0, "length": 18}]
+# `answer_scope: asked` with the whole group as context: plain lines are logged, never answered
+PRIVACY_OFF = PROFILE.replace(
+    "  admins: {222: Marta}\n", "  admins: {222: Marta}\n  history_scope: all\n"
+)
 
 
 def eyes_on(bot, mid, timeout=5.0):
@@ -207,3 +212,271 @@ def test_forgetting_old_eyes_never_drops_one_still_on_its_way(make_bot, monkeypa
     release.set()
     bot.join_idle()
     assert reactions(bot)[:2] == [(a["message_id"], "👀"), (b["message_id"], "👀")]
+
+
+# --- on arrival ------------------------------------------------------------------------------
+
+
+def slow_reactions(bot, first_only=False):
+    """Hold every `setMessageReaction` (or only the first) until the returned Event is set."""
+    release, call, calls = threading.Event(), bot.tg.call, []
+
+    def slow(method, **params):
+        if method == "setMessageReaction":
+            calls.append(params)
+            if not first_only or len(calls) == 1:
+                release.wait(10)
+        return call(method, **params)
+
+    bot.tg.call = slow
+    return release
+
+
+def held_turn(bot):
+    """The next turn's plugin call waits until `go` is set; `started` is set once it runs."""
+    started, go = threading.Event(), threading.Event()
+
+    def answer(turn):
+        started.set()
+        go.wait(10)
+        return "Vale."
+
+    plugin(bot).REPLIES[:] = [answer]
+    return started, go
+
+
+def test_a_photo_sent_during_a_running_turn_shows_eyes_before_that_turn_ends(make_bot):
+    # MUT: drop `self.look(chat, [line])` in queue_line → the photo waits for its own turn
+    bot = make_bot(profile=ALL)
+    bot.tg.files["m1"] = b"fictional media"
+    started, go = held_turn(bot)
+    first = message("¿compras pan?")
+    bot.handle({"message": first})
+    assert started.wait(5)
+    pic = media("photo")
+    bot.handle({"message": pic})  # a file never joins a running turn: it waits for the next
+    try:
+        assert eyes_on(bot, pic["message_id"], timeout=2)
+        assert bot.tg.texts() == [] and len(plugin(bot).CALLS) == 1  # the first turn still runs
+    finally:
+        go.set()
+    bot.join_idle()
+    assert len(plugin(bot).CALLS) == 2
+    assert sorted(reactions(bot)) == sorted(
+        [(first["message_id"], "👀"), (pic["message_id"], "👀")]
+    )
+
+
+def test_a_line_arriving_mid_turn_shows_eyes_before_the_plugin_takes_it(make_bot):
+    # MUT: drop `self.look(chat, [line])` in queue_line → no 👀 until `incoming` takes it
+    bot = make_bot(profile=ALL)
+    first, late = message("quedan 10 raciones"), message("y pan", user=HER)
+    seen = []
+
+    def handover(turn):
+        bot.handle({"message": late})
+        seen.append(eyes_on(bot, late["message_id"], timeout=2))  # not taken yet
+        got = turn["incoming"]()
+        return {"text": "Anotado.", "conversation": "c", "kept": True, "covers": [got[0]["id"]]}
+
+    plugin(bot).REPLIES[:] = [handover]
+    bot.handle({"message": first})
+    bot.join_idle()
+    assert seen == [True]
+    assert reactions(bot) == [(first["message_id"], "👀"), (late["message_id"], "👀")]
+    assert len(plugin(bot).CALLS) == 1
+
+
+def private_line():
+    msg = message("hola", user=HER)
+    msg["chat"] = {"id": HER, "type": "private"}
+    return msg
+
+
+def voice_note():
+    return {
+        "message_id": 70_001,
+        "from": {"id": HER},
+        "chat": {"id": GROUP, "type": "supergroup"},
+        "voice": {"file_id": "v1", "duration": 4},
+    }
+
+
+ARRIVALS = {
+    "a private chat": private_line,
+    "asked, a mention": lambda: mentioned("¿me ha bajado?"),
+    "asked, a reply to the bot": lambda: addressed("hoy poco"),
+    "asked, a voice note": voice_note,
+    "asked, a photo": lambda: media("photo"),
+}
+
+
+@pytest.mark.parametrize("case", list(ARRIVALS))
+def test_eyes_land_on_arrival_before_the_turn_starts(make_bot, case):
+    # MUT: drop `self.look(chat, [line])` in queue_line → no 👀 while the debounce runs
+    bot = make_bot()  # `answer_scope: asked`
+    bot.tg.files["v1"] = b"OggS fictional"
+    bot.tg.files["m1"] = b"fictional media"
+    plugin(bot).VOICES[:] = ["me ha bajado"]
+    bot.debounce_s = 30  # the turn cannot start while the test looks
+    msg = ARRIVALS[case]()
+    bot.handle({"message": msg})
+    try:
+        assert eyes_on(bot, msg["message_id"], timeout=2)
+        assert plugin(bot).CALLS == []
+    finally:
+        bot.debounce_s = 0
+    bot.join_idle()
+    assert len(plugin(bot).CALLS) == 1
+    assert reactions(bot) == [(msg["message_id"], "👀")]  # once, never on the bot's echo
+
+
+def test_an_edit_that_now_calls_the_bot_gets_eyes_on_arrival(make_bot):
+    # MUT: drop `self.look(chat, [line])` in queue_line → the edit's message waits for its turn
+    bot = make_bot(profile=PRIVACY_OFF)
+    plain = message("quedan 10 raciones", user=HER)
+    bot.handle({"message": plain})
+    bot.join_idle()
+    assert reactions(bot) == [] and plugin(bot).CALLS == []  # context: never answered
+    bot.debounce_s = 30
+    edited = {**plain, "text": "@example_cycle_bot quedan 8 raciones", "entities": MENTION}
+    bot.handle({"edited_message": edited})
+    try:
+        assert eyes_on(bot, plain["message_id"], timeout=2)
+        assert plugin(bot).CALLS == []
+    finally:
+        bot.debounce_s = 0
+    bot.join_idle()
+    assert len(plugin(bot).CALLS) == 1
+    assert reactions(bot) == [(plain["message_id"], "👀")]
+
+
+def test_an_asked_mode_context_line_gets_no_eyes(make_bot):
+    # MUT: call `self.look` in log_seen → 👀 on a line the bot never answers
+    bot = make_bot(profile=PRIVACY_OFF)
+    plain = message("¿alguien compra pan?")
+    bot.handle({"message": plain})
+    bot.join_idle()
+    asked = mentioned("¿me ha bajado?")
+    bot.handle({"message": asked})
+    bot.join_idle()
+    assert len(plugin(bot).CALLS) == 1
+    assert reactions(bot) == [(asked["message_id"], "👀")]
+
+
+def test_a_slow_arrival_eyes_never_holds_the_handler(make_bot):
+    # MUT: run the 👀 job inline in `look` instead of `self.eyes.submit` → handle() waits on it
+    bot = make_bot(profile=ALL)
+    release = slow_reactions(bot)
+    msg = message("¿compras pan?")
+    try:
+        started = time.monotonic()
+        bot.handle({"message": msg})
+        assert time.monotonic() - started < 1
+    finally:
+        release.set()
+    bot.join_idle()
+    assert bot.tg.texts() == ["Vale."]
+    assert reactions(bot) == [(msg["message_id"], "👀")]
+
+
+def test_an_arrival_eyes_on_its_way_lands_before_a_reaction_only_answer(make_bot):
+    # MUT: drop `state.looks.append(was)` in `_look` → the 👍 lands first and the 👀 covers it
+    bot = make_bot(profile=ALL)
+    release = slow_reactions(bot, first_only=True)
+    answered = threading.Event()
+
+    def answer(turn):
+        answered.set()
+        return REACT
+
+    plugin(bot).REPLIES[:] = [answer]
+    msg = message("quedan 10 raciones")
+    bot.handle({"message": msg})
+    assert answered.wait(5)
+    time.sleep(0.3)  # time for an end of turn that did not wait to put its 👍
+    release.set()
+    bot.join_idle()
+    assert reactions(bot) == [(msg["message_id"], "👀"), (msg["message_id"], "👍")]
+
+
+# --- the 👀 never stands in for the answer ----------------------------------------------------
+
+
+def test_a_photo_marked_during_a_running_turn_still_gets_its_answer_in_its_own_turn(make_bot):
+    # MUT: `_turn` skips lines whose message already shows 👀 → the photo is never answered
+    bot = make_bot(profile=ALL)
+    bot.tg.files["m1"] = b"fictional media"
+    started, go = held_turn(bot)
+    first = message("¿compras pan?")
+    bot.handle({"message": first})
+    assert started.wait(5)
+    pic = media("photo")
+    bot.handle({"message": pic})
+    assert eyes_on(bot, pic["message_id"], timeout=2)
+    plugin(bot).REPLIES.append(REACT)  # its own turn answers with a reaction only
+    go.set()
+    bot.join_idle()
+    calls = plugin(bot).CALLS
+    assert len(calls) == 2
+    assert [f"inbox/{pic['message_id']}-foto.jpg" in c for c in contents(calls[1])] == [True]
+    assert bot.tg.texts() == ["Vale."]
+    assert reactions(bot)[-2:] == [(pic["message_id"], "👀"), (pic["message_id"], "👍")]
+
+
+def test_a_line_marked_mid_turn_that_the_plugin_never_took_gets_its_own_answer(make_bot):
+    # MUT: `_turn` skips lines whose message already shows 👀 → the late line is never answered
+    bot = make_bot(profile=ALL)
+    first, late = message("quedan 10 raciones"), message("¿y pan?", user=HER)
+
+    def ignores(turn):
+        bot.handle({"message": late})  # never handed over: `incoming` is not called
+        assert eyes_on(bot, late["message_id"], timeout=2)
+        return "Vale."
+
+    plugin(bot).REPLIES[:] = [ignores, "Sí, compro pan."]
+    bot.handle({"message": first})
+    bot.join_idle()
+    calls = plugin(bot).CALLS
+    assert len(calls) == 2
+    assert [c.endswith("¿y pan?") for c in contents(calls[1])] == [True]
+    assert bot.tg.texts() == ["Vale.", "Sí, compro pan."]
+    assert reactions(bot) == [(first["message_id"], "👀"), (late["message_id"], "👀")]
+
+
+def test_a_message_marked_on_arrival_whose_turn_failed_gets_its_answer_on_the_retry(make_bot):
+    # MUT: act reacts only on messages without the bot's 👀 → the retry's answer reaches nobody
+    bot = make_bot(profile=ALL)
+    plugin(bot).REPLIES[:] = [RuntimeError("down"), REACT]
+    a = message("quedan 10 raciones")
+    bot.handle({"message": a})
+    bot.join_idle()  # failed, quietly: the line stays with its 👀
+    assert reactions(bot) == [(a["message_id"], "👀")] and sent(bot) == []
+    b = message("y 2 de pan", user=HER)
+    bot.handle({"message": b})
+    bot.join_idle()
+    calls = plugin(bot).CALLS
+    assert len(calls) == 2
+    assert [c.rsplit(": ", 1)[1] for c in contents(calls[1])] == [
+        "quedan 10 raciones",
+        "y 2 de pan",
+    ]
+    assert reactions(bot)[2:] == [(a["message_id"], "👍"), (b["message_id"], "👍")]
+
+
+def test_a_message_marked_before_a_restart_still_gets_its_answer_after_it(make_bot, data_repo):
+    # MUT: a line marked on arrival is stored as handled and `_turn` skips it → no answer
+    from test_turns import _restart
+
+    bot = make_bot()
+    bot.worker.stop()  # the process dies before the turn starts
+    msg = addressed("¿me toca ya?")
+    bot.handle({"message": msg})
+    assert eyes_on(bot, msg["message_id"])
+    new = _restart(bot, data_repo)
+    try:
+        assert len(plugin(new).CALLS) == 1
+        assert new.tg.texts() == ["Vale."]
+        assert new.kv.get_json(f"pending:{GROUP}") is None
+    finally:
+        new.close()

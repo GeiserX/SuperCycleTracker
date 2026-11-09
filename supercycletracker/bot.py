@@ -661,8 +661,9 @@ class Bot:
         self.hearer = Worker(self._hear_chat, name="sct-hear")
         self.side = Worker(lambda job: job(), name="sct-asks")  # answers to asks, off the poll loop
         self.eyes = Worker(lambda job: job(), name="sct-eyes")  # a turn's 👀, so it never waits
-        # (chat, message) -> the 👀 the bot put on it: True shown, False refused, None on its way
-        self._eyed: OrderedDict[tuple[int, int], bool | None] = OrderedDict()
+        # (chat, message) -> the 👀 the bot put on it: True shown, False refused, or the Event
+        # its job sets once it is done, while it is on its way
+        self._eyed: OrderedDict[tuple[int, int], bool | threading.Event] = OrderedDict()
 
     def start(self) -> None:
         """`getMe`, then `getChatMember` for the bot in the group: Telegram delivers every group
@@ -1608,8 +1609,11 @@ class Bot:
         log.info("file queued" if file is not None else "text queued")
 
     def queue_line(self, chat: int, line: dict) -> None:
-        """Append `line` to `pending:<chat>` (the newest 10, none older than 7 days) and queue
-        the chat: a voice note for the hearing thread, text for the worker."""
+        """Put 👀 on the person's message `line` is, then append `line` to `pending:<chat>` (the
+        newest 10, none older than 7 days) and queue the chat: a voice note for the hearing
+        thread, text for the worker. Every message a turn will answer passes here, and only
+        those: a group line that does not call the bot goes to the log instead (`log_seen`)."""
+        self.look(chat, [line])  # 👀 the moment it arrives, before anything else
         now = int(self.now().timestamp())
         dropped = []
 
@@ -2173,7 +2177,7 @@ class Bot:
             self.post(chat, html.escape(self.t("read_no_answer")), reply_parameters=note)
             log.info("ai turn showed nothing for an addressed message: read_no_answer")
         read = [m for m in people if m not in asking]
-        with self._q:  # the 👀 put when the turn started stays; where it was refused, 👍 once
+        with self._q:  # the 👀 put on arrival stays; where it was refused, 👍 once
             fresh = [m for m in read if (chat, m) not in self._eyed]
             refused = [m for m in read if self._eyed.get((chat, m)) is False]
         if fresh:
@@ -2183,37 +2187,46 @@ class Bot:
         if read:
             log.info("ai turn showed nothing: read mark on %d", len(read))
 
-    def look(self, chat: int, lines: Sequence[Mapping], state: Turn) -> None:
-        """👀 on every person's message of `lines` that has none from the bot yet, as a turn
-        starts, so the chat sees at once that the bot is on it: a text, voice note, photo or
-        file, an edit on the message edited; never a tap (its message is the bot's)."""
+    def look(self, chat: int, lines: Sequence[Mapping], state: Turn | None = None) -> None:
+        """👀 on every person's message of `lines` that has none from the bot yet, so the chat
+        sees at once that the bot is on it: a text, voice note, photo or file, an edit on the
+        message edited; never a tap (its message is the bot's). `queue_line` calls it the moment
+        a line arrives, a turn again as it starts (a no-op for a message already marked)."""
         with self._q:
             job = self._look(chat, lines, state)
         if job is not None:
             self.eyes.submit(job)
 
-    def _look(self, chat: int, lines: Sequence[Mapping], state: Turn) -> Callable | None:
+    def _look(self, chat: int, lines: Sequence[Mapping], state: Turn | None) -> Callable | None:
         """With `_q` held: claim the messages of `lines` that need 👀 and return the job that
-        puts it, for the `eyes` thread, so the turn never waits on Telegram (None: nothing to
-        do). A refusal is logged and nothing else: no 👍 (that says «noted»), no text."""
-        mids = [m for m in _people(lines) if (chat, m) not in self._eyed]
+        puts it, for the `eyes` thread, so neither the update handler nor the turn ever waits on
+        Telegram (None: nothing to do). A 👀 still on its way, from this claim or from the
+        message's arrival, joins `state.looks`, so the end of the turn waits for it. A refusal
+        is logged and nothing else: no 👍 (that says «noted»), no text."""
+        mids = []
+        for m in _people(lines):
+            if (chat, m) not in self._eyed:
+                mids.append(m)
+            elif isinstance(was := self._eyed[(chat, m)], threading.Event) and state is not None:
+                state.looks.append(was)  # claimed on arrival, still on its way
+        done = threading.Event()
         for m in mids:
-            self._eyed[(chat, m)] = None
+            self._eyed[(chat, m)] = done
         while len(self._eyed) > EYED_MAX:  # forget the oldest done, never one on its way
-            old = next((k for k, v in self._eyed.items() if v is not None), None)
+            old = next((k for k, v in self._eyed.items() if isinstance(v, bool)), None)
             if old is None:
                 break
             del self._eyed[old]
         if not mids:
             return None
-        done = threading.Event()
-        state.looks.append(done)  # under `_q`, so the end of the turn always waits for it
+        if state is not None:
+            state.looks.append(done)  # under `_q`, so the end of the turn always waits for it
 
         def job() -> None:
             try:
                 for m in mids:
                     with self._q:
-                        if (chat, m) not in self._eyed:
+                        if self._eyed.get((chat, m)) is not done:
                             continue  # the answer's own reaction is already on it
                     ok = False
                     try:
@@ -2225,11 +2238,15 @@ class Bot:
                         )
                         ok = True
                     except Exception as e:  # noqa: BLE001 - a refusal never touches the turn
-                        log.info("start read mark failed: %s", safe(e))
+                        log.info("read mark failed: %s", safe(e))
                     with self._q:
-                        if (chat, m) in self._eyed:
+                        if self._eyed.get((chat, m)) is done:
                             self._eyed[(chat, m)] = ok
             finally:
+                with self._q:  # whatever stopped the loop, nothing stays «on its way»
+                    for m in mids:
+                        if self._eyed.get((chat, m)) is done:
+                            self._eyed[(chat, m)] = False
                 done.set()
 
         return job
@@ -2379,7 +2396,7 @@ class Bot:
                 for uid in _users(got):
                     if uid not in state.users:
                         state.users.append(uid)
-                look = self._look(state.chat, got, state)  # a line that joins shows 👀 at once
+                look = self._look(state.chat, got, state)  # 👀 it got on arrival, or now
             if look is not None:
                 self.eyes.submit(look)
             return [
